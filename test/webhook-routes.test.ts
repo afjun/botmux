@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   connectorTriggerPresentation,
+  resolveConnectorMentionIdentities,
   resolveConnectorTriggerPresentation,
   verifyWebhookSignature,
   verifyWebhookToken,
@@ -191,6 +192,28 @@ afterEach(async () => {
 });
 
 describe('webhook route verification helpers', () => {
+  it('strictly verifies direct open_ids with the target bot before mentioning them', async () => {
+    const resolveRaw = vi.fn(async (_botId: string, identities: string[]) => ({
+      map: new Map(identities.map(identity => [identity, 'ou_resolved_email'])),
+    }));
+    const getProfile = vi.fn(async (_botId: string, openId: string) => (
+      openId === 'ou_same_app' ? { status: 'ok' as const, profile: { name: 'Same app' } } : { status: 'cross_app' as const }
+    ));
+
+    const result = await resolveConnectorMentionIdentities(
+      'app1',
+      ['ou_same_app', 'ou_foreign', 'owner@corp.com'],
+      { resolveRaw, getProfile },
+    );
+
+    expect(result).toEqual(new Map([
+      ['owner@corp.com', 'ou_resolved_email'],
+      ['ou_same_app', 'ou_same_app'],
+    ]));
+    expect(resolveRaw).toHaveBeenCalledWith('app1', ['owner@corp.com']);
+    expect(getProfile).toHaveBeenCalledTimes(2);
+  });
+
   it('verifies HMAC over timestamp dot raw-body', () => {
     const ts = '1770000000';
     const raw = Buffer.from('{"ok":true}');

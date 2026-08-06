@@ -29,6 +29,7 @@ function templateConnector(): ConnectorDefinition {
       extractors: {
         owners: { path: '$.owners', kind: 'mention' },
         watchers: { path: '$.watchers', kind: 'mention' },
+        unused: { path: '$.privateReviewers', kind: 'mention' },
       },
     },
     loggingPolicy: { storePayload: false, storeHeaders: false, retentionDays: 14 },
@@ -46,8 +47,64 @@ describe('connector trusted topic template', () => {
     const owners = Array.from({ length: 15 }, (_, index) => `owner${index}@corp.com`);
     const watchers = Array.from({ length: 15 }, (_, index) => `watcher${index}@corp.com`);
 
-    await renderConnectorTopicTemplate(templateConnector(), { owners, watchers }, resolveIdentities);
+    await renderConnectorTopicTemplate(
+      templateConnector(),
+      { owners, watchers, privateReviewers: ['private@corp.com'] },
+      resolveIdentities,
+    );
 
     expect(resolveIdentities).toHaveBeenCalledWith('app1', [...owners, ...watchers.slice(0, 5)]);
+  });
+
+  it('keeps complete owner/trigger mentions and labels with oversized display names', async () => {
+    const connector = templateConnector();
+    connector.topicMessage = {
+      mode: 'template',
+      text: 'Meego启动开发：{{title}} {{mention owner}}负责人 {{mention trigger}}触发人',
+      extractors: {
+        title: { path: '$.title', kind: 'text' },
+        owner: { path: '$.owner', kind: 'mention', identityPath: '$.email', namePath: '$.name' },
+        trigger: { path: '$.trigger', kind: 'mention', identityPath: '$.email', namePath: '$.name' },
+      },
+    };
+
+    const message = await renderConnectorTopicTemplate(
+      connector,
+      {
+        title: '重要需求'.repeat(100),
+        owner: { email: 'owner@corp.com', name: '超长负责人'.repeat(80) },
+        trigger: { email: 'trigger@corp.com', name: '超长触发人'.repeat(80) },
+      },
+      async () => new Map([
+        ['owner@corp.com', 'ou_owner'],
+        ['trigger@corp.com', 'ou_trigger'],
+      ]),
+    );
+
+    expect(Array.from(message ?? '')).toHaveLength(200);
+    expect(message).toContain('<at user_id="ou_owner">');
+    expect(message).toContain('</at>负责人');
+    expect(message).toContain('<at user_id="ou_trigger">');
+    expect(message).toContain('</at>触发人');
+    expect((message?.match(/<at /g) ?? [])).toHaveLength(2);
+    expect((message?.match(/<\/at>/g) ?? [])).toHaveLength(2);
+  });
+
+  it('keeps a native mention when a template has an oversized static suffix', async () => {
+    const connector = templateConnector();
+    connector.topicMessage = {
+      mode: 'template',
+      text: `{{mention owners}}负责人${'补充说明'.repeat(44)}`,
+      extractors: { owners: { path: '$.owner', kind: 'mention' } },
+    };
+
+    const message = await renderConnectorTopicTemplate(
+      connector,
+      { owner: 'owner@corp.com' },
+      async () => new Map([['owner@corp.com', 'ou_owner']]),
+    );
+
+    expect(Array.from(message ?? '').length).toBeLessThanOrEqual(200);
+    expect(message).toContain('<at user_id="ou_owner">owner@corp.com</at>负责人');
   });
 });

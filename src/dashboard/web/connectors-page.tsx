@@ -921,13 +921,16 @@ function ConnectorsPage(props: { tab: ConnectorsTab }) {
               })}
             </div>
             {form.topicMessageMode === 'custom' || form.topicMessageMode === 'template' ? (
-              <label className="connector-topic-message-input" htmlFor="cn-topic-message">
+              <div className="connector-topic-message-input">
                 <input
                   id="cn-topic-message"
                   type="text"
                   maxLength={200}
                   value={form.topicMessageText}
                   onChange={event => patchForm({ topicMessageText: event.currentTarget.value })}
+                  aria-label={tr(form.topicMessageMode === 'template'
+                    ? 'connectors.topicMessageTemplate'
+                    : 'connectors.topicMessageCustom')}
                   placeholder={tr(form.topicMessageMode === 'template'
                     ? 'connectors.topicMessageTemplatePh'
                     : 'connectors.topicMessageCustomPh')}
@@ -941,6 +944,7 @@ function ConnectorsPage(props: { tab: ConnectorsTab }) {
                 {form.topicMessageMode === 'template' ? (
                   <>
                     <textarea
+                      id="cn-topic-message-extractors"
                       className="connector-topic-message-extractors"
                       rows={8}
                       value={form.topicMessageExtractors}
@@ -951,7 +955,7 @@ function ConnectorsPage(props: { tab: ConnectorsTab }) {
                     <small>{tr('connectors.topicMessageExtractorsHelp')}</small>
                   </>
                 ) : null}
-              </label>
+              </div>
             ) : (
               <p className={`connector-topic-message-preview${form.topicMessageMode === 'none' ? ' muted' : ''}`}>
                 {form.topicMessageMode === 'none'

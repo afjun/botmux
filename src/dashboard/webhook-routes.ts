@@ -181,9 +181,37 @@ export function connectorTriggerPresentation(
   return { topicMessage: Array.from(resolved).slice(0, 200).join('') };
 }
 
+interface ConnectorMentionIdentityDeps {
+  resolveRaw: (botId: string, identities: string[]) => Promise<{ map: Map<string, string> }>;
+  getProfile: (botId: string, userId: string, idType: 'open_id') => Promise<{ status: string }>;
+}
+
+/** Resolve indirect identities normally, but require direct open_ids from the
+ * untrusted payload to be visible through this target Bot before accepting them. */
+export async function resolveConnectorMentionIdentities(
+  botId: string,
+  identities: string[],
+  deps: ConnectorMentionIdentityDeps,
+): Promise<Map<string, string>> {
+  const directOpenIds = identities.filter(identity => identity.startsWith('ou_'));
+  const indirectIdentities = identities.filter(identity => !identity.startsWith('ou_'));
+  const resolved = indirectIdentities.length > 0
+    ? new Map((await deps.resolveRaw(botId, indirectIdentities)).map)
+    : new Map<string, string>();
+  await Promise.all(directOpenIds.map(async openId => {
+    if (!/^ou_[A-Za-z0-9_-]+$/.test(openId)) return;
+    const profile = await deps.getProfile(botId, openId, 'open_id');
+    if (profile.status === 'ok') resolved.set(openId, openId);
+  }));
+  return resolved;
+}
+
 async function defaultResolveMentionIdentities(botId: string, identities: string[]): Promise<Map<string, string>> {
-  const { resolveAllowedUsersWithMap } = await import('../im/lark/client.js');
-  return (await resolveAllowedUsersWithMap(botId, identities)).map;
+  const { getUserProfileStrict, resolveAllowedUsersWithMap } = await import('../im/lark/client.js');
+  return resolveConnectorMentionIdentities(botId, identities, {
+    resolveRaw: resolveAllowedUsersWithMap,
+    getProfile: getUserProfileStrict,
+  });
 }
 
 /** Template rendering is asynchronous because identities from untrusted event

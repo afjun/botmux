@@ -4,6 +4,9 @@ import { getJsonPathValue } from './webhook-lifecycle-extractors.js';
 const TEMPLATE_TOKEN = /{{\s*(?:(mention)\s+)?([A-Za-z][A-Za-z0-9_.-]{0,63})\s*}}/g;
 const MAX_TOPIC_MESSAGE_CODEPOINTS = 200;
 const MAX_MENTION_VALUES = 20;
+const MAX_MENTION_NAME_CODEPOINTS = 32;
+const MAX_OPEN_ID_CODEPOINTS = 80;
+const MAX_PROTECTED_POST_MENTION_CODEPOINTS = 16;
 const VALID_OPEN_ID = /^ou_[A-Za-z0-9_-]+$/;
 
 export type ResolveConnectorMentionIdentities = (
@@ -16,10 +19,18 @@ interface MentionCandidate {
   name: string;
 }
 
-interface RenderChunk {
+interface TextRenderChunk {
   text: string;
-  kind: 'static' | 'flexible' | 'mention';
+  kind: 'static' | 'protected' | 'flexible';
 }
+
+interface MentionRenderChunk {
+  kind: 'mention';
+  name: string;
+  openId?: string;
+}
+
+type RenderChunk = TextRenderChunk | MentionRenderChunk;
 
 function scalarText(value: unknown): string | undefined {
   if (typeof value === 'string') return value.trim() || undefined;
@@ -55,32 +66,84 @@ function mentionCandidates(
   return candidates;
 }
 
+function codepointLength(value: string): number {
+  return Array.from(value).length;
+}
+
+function truncateCodepoints(value: string, limit: number): string {
+  return Array.from(value).slice(0, Math.max(0, limit)).join('');
+}
+
+function renderMentionWithin(chunk: MentionRenderChunk, budget: number): string {
+  const name = truncateCodepoints(chunk.name, MAX_MENTION_NAME_CODEPOINTS);
+  if (budget <= 0 || !name) return '';
+  if (chunk.openId) {
+    const prefix = `<at user_id="${chunk.openId}">`;
+    const suffix = '</at>';
+    const nameBudget = budget - codepointLength(prefix) - codepointLength(suffix);
+    if (nameBudget > 0) return `${prefix}${truncateCodepoints(name, nameBudget)}${suffix}`;
+  }
+  return truncateCodepoints(name, budget);
+}
+
+function appendStaticChunks(chunks: RenderChunk[], text: string, protectPostMention: boolean): void {
+  if (!protectPostMention) {
+    chunks.push({ text, kind: 'static' });
+    return;
+  }
+  const protectedText = truncateCodepoints(text, MAX_PROTECTED_POST_MENTION_CODEPOINTS);
+  if (protectedText) chunks.push({ text: protectedText, kind: 'protected' });
+  const remainder = Array.from(text).slice(MAX_PROTECTED_POST_MENTION_CODEPOINTS).join('');
+  if (remainder) chunks.push({ text: remainder, kind: 'static' });
+}
+
 function limitedTopicMessage(chunks: RenderChunk[]): string {
-  const length = (value: string): number => Array.from(value).length;
-  const mentionLength = chunks
-    .filter(chunk => chunk.kind === 'mention')
-    .reduce((total, chunk) => total + length(chunk.text), 0);
+  const protectedLength = chunks
+    .filter((chunk): chunk is TextRenderChunk => chunk.kind === 'protected')
+    .reduce((total, chunk) => total + codepointLength(chunk.text), 0);
+  let protectedBudget = Math.min(protectedLength, MAX_TOPIC_MESSAGE_CODEPOINTS);
+  let remainingBudget = MAX_TOPIC_MESSAGE_CODEPOINTS - protectedBudget;
+
+  const mentions = chunks.filter((chunk): chunk is MentionRenderChunk => chunk.kind === 'mention');
+  const mentionText = new Map<MentionRenderChunk, string>();
+  const desiredMentions = mentions.map(chunk => renderMentionWithin(chunk, Number.MAX_SAFE_INTEGER));
+  const desiredMentionLength = desiredMentions.reduce((total, value) => total + codepointLength(value), 0);
+  if (desiredMentionLength <= remainingBudget) {
+    mentions.forEach((chunk, index) => mentionText.set(chunk, desiredMentions[index]));
+    remainingBudget -= desiredMentionLength;
+  } else {
+    let mentionsRemaining = mentions.length;
+    for (const chunk of mentions) {
+      const share = Math.floor(remainingBudget / Math.max(1, mentionsRemaining));
+      const rendered = renderMentionWithin(chunk, share);
+      mentionText.set(chunk, rendered);
+      remainingBudget -= codepointLength(rendered);
+      mentionsRemaining -= 1;
+    }
+  }
+
   const staticLength = chunks
-    .filter(chunk => chunk.kind === 'static')
-    .reduce((total, chunk) => total + length(chunk.text), 0);
-  let staticBudget = Math.min(staticLength, Math.max(0, MAX_TOPIC_MESSAGE_CODEPOINTS - mentionLength));
-  let flexibleBudget = Math.max(0, MAX_TOPIC_MESSAGE_CODEPOINTS - mentionLength - staticBudget);
+    .filter((chunk): chunk is TextRenderChunk => chunk.kind === 'static')
+    .reduce((total, chunk) => total + codepointLength(chunk.text), 0);
+  let staticBudget = Math.min(staticLength, remainingBudget);
+  remainingBudget -= staticBudget;
+  let flexibleBudget = remainingBudget;
   const output: string[] = [];
-  let remaining = MAX_TOPIC_MESSAGE_CODEPOINTS;
   for (const chunk of chunks) {
-    const codepoints = Array.from(chunk.text);
     if (chunk.kind === 'mention') {
-      if (codepoints.length <= remaining) {
-        output.push(chunk.text);
-        remaining -= codepoints.length;
-      }
+      const rendered = mentionText.get(chunk);
+      if (rendered) output.push(rendered);
       continue;
     }
-    const budget = chunk.kind === 'static' ? staticBudget : flexibleBudget;
-    const take = Math.min(remaining, budget, codepoints.length);
-    if (take > 0) output.push(codepoints.slice(0, take).join(''));
-    remaining -= take;
-    if (chunk.kind === 'static') staticBudget -= take;
+    const budget = chunk.kind === 'protected'
+      ? protectedBudget
+      : chunk.kind === 'static'
+        ? staticBudget
+        : flexibleBudget;
+    const take = Math.min(budget, codepointLength(chunk.text));
+    if (take > 0) output.push(truncateCodepoints(chunk.text, take));
+    if (chunk.kind === 'protected') protectedBudget -= take;
+    else if (chunk.kind === 'static') staticBudget -= take;
     else flexibleBudget -= take;
   }
   return output.join('').trim();
@@ -97,8 +160,13 @@ export async function renderConnectorTopicTemplate(
   const mentionValues = new Map<string, MentionCandidate[]>();
   const identities: string[] = [];
   let mentionCount = 0;
+  const referencedMentionAliases = new Set(
+    [...topicMessage.text.matchAll(TEMPLATE_TOKEN)]
+      .filter(match => Boolean(match[1]))
+      .map(match => match[2]),
+  );
   for (const [alias, extractor] of Object.entries(topicMessage.extractors)) {
-    if (extractor.kind !== 'mention') continue;
+    if (extractor.kind !== 'mention' || !referencedMentionAliases.has(alias)) continue;
     const candidates = mentionCandidates(
       getJsonPathValue(payload, extractor.path),
       extractor,
@@ -124,42 +192,55 @@ export async function renderConnectorTopicTemplate(
   const source = connector.promptEnvelope.sourceName || connector.name;
   const chunks: RenderChunk[] = [];
   let cursor = 0;
+  let previousTokenWasMention = false;
   for (const match of topicMessage.text.matchAll(TEMPLATE_TOKEN)) {
     const index = match.index ?? 0;
-    if (index > cursor) chunks.push({ text: topicMessage.text.slice(cursor, index), kind: 'static' });
+    if (index > cursor) {
+      appendStaticChunks(chunks, topicMessage.text.slice(cursor, index), previousTokenWasMention);
+    }
     const mention = match[1];
     const alias = match[2];
     if (alias === 'source') {
       chunks.push({ text: escapeConnectorTopicText(source), kind: 'flexible' });
       cursor = index + match[0].length;
+      previousTokenWasMention = false;
       continue;
     }
     const extractor = topicMessage.extractors?.[alias];
     if (!extractor) {
       cursor = index + match[0].length;
+      previousTokenWasMention = false;
       continue;
     }
     if (!mention) {
       const value = scalarText(getJsonPathValue(payload, extractor.path));
       if (value) chunks.push({ text: escapeConnectorTopicText(value), kind: 'flexible' });
       cursor = index + match[0].length;
+      previousTokenWasMention = false;
       continue;
     }
-    const renderedMentions = (mentionValues.get(alias) ?? []).map(candidate => {
+    const renderedMentions = (mentionValues.get(alias) ?? []).map<MentionRenderChunk>(candidate => {
       const openId = resolved.get(candidate.identity);
       const name = escapeConnectorTopicText(candidate.name);
-      return openId && VALID_OPEN_ID.test(openId)
-        ? `<at user_id="${openId}">${name}</at>`
-        : name;
+      return {
+        kind: 'mention',
+        name,
+        ...(openId
+          && codepointLength(openId) <= MAX_OPEN_ID_CODEPOINTS
+          && VALID_OPEN_ID.test(openId)
+          ? { openId }
+          : {}),
+      };
     });
     renderedMentions.forEach((value, position) => {
-      if (position > 0) chunks.push({ text: ' ', kind: 'static' });
-      chunks.push({ text: value, kind: value.startsWith('<at user_id="') ? 'mention' : 'static' });
+      if (position > 0) chunks.push({ text: ' ', kind: 'protected' });
+      chunks.push(value);
     });
     cursor = index + match[0].length;
+    previousTokenWasMention = true;
   }
   if (cursor < topicMessage.text.length) {
-    chunks.push({ text: topicMessage.text.slice(cursor), kind: 'static' });
+    appendStaticChunks(chunks, topicMessage.text.slice(cursor), previousTokenWasMention);
   }
   return limitedTopicMessage(chunks) || undefined;
 }
