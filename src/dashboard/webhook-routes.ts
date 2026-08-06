@@ -11,6 +11,10 @@ import {
 } from '../services/trigger-log-store.js';
 import { extractDedupKey } from '../services/webhook-lifecycle-extractors.js';
 import {
+  renderConnectorTopicTemplate,
+  type ResolveConnectorMentionIdentities,
+} from '../services/connector-topic-template.js';
+import {
   webhookAuditRequest,
   webhookAuditResponse,
   webhookAuditTarget,
@@ -43,6 +47,7 @@ export type WebhookRouteDeps = TriggerApiDeps & {
     connector: ConnectorDefinition,
     args: { dedupKey: string },
   ) => Promise<{ chatId: string; creatorLarkAppId?: string }>;
+  resolveMentionIdentities?: ResolveConnectorMentionIdentities;
 };
 
 function headerValue(req: IncomingMessage, name: string): string | undefined {
@@ -174,6 +179,24 @@ export function connectorTriggerPresentation(
   const source = connector.promptEnvelope.sourceName || connector.name;
   const resolved = text.replaceAll('{source}', source);
   return { topicMessage: Array.from(resolved).slice(0, 200).join('') };
+}
+
+async function defaultResolveMentionIdentities(botId: string, identities: string[]): Promise<Map<string, string>> {
+  const { resolveAllowedUsersWithMap } = await import('../im/lark/client.js');
+  return (await resolveAllowedUsersWithMap(botId, identities)).map;
+}
+
+/** Template rendering is asynchronous because identities from untrusted event
+ *  data must be resolved into this connector Bot's app-scoped open_ids before
+ *  they may become native Lark mentions. */
+export async function resolveConnectorTriggerPresentation(
+  connector: ConnectorDefinition,
+  payload: unknown,
+  resolveMentions: ResolveConnectorMentionIdentities = defaultResolveMentionIdentities,
+): Promise<TriggerRequest['presentation'] | undefined> {
+  if (connector.topicMessage?.mode !== 'template') return connectorTriggerPresentation(connector);
+  const topicMessage = await renderConnectorTopicTemplate(connector, payload, resolveMentions);
+  return topicMessage ? { topicMessage } : undefined;
 }
 
 function dynamicChatId(req: IncomingMessage, url: URL, payload: unknown): string | undefined {
@@ -448,7 +471,6 @@ export async function handleWebhookRoute(
   }
 
   const responseOptions = parseTriggerResponseOptions(req, url);
-  const presentation = connectorTriggerPresentation(connector);
   // Stored workflow connectors are tombstones only after the v2 runtime
   // retirement. Fail before lifecycle state or group creation; dispatching to
   // a daemon would make the safety property depend on daemon version/skew.
@@ -462,6 +484,11 @@ export async function handleWebhookRoute(
     );
     return true;
   }
+  const presentation = await resolveConnectorTriggerPresentation(
+    connector,
+    parsed.payload,
+    deps.resolveMentionIdentities,
+  );
   if ((responseOptions.waitForFinalOutput || responseOptions.asyncReturnSessionId) && connector.target.kind !== 'turn') {
     fail(400, 'bad_request', 'wait mode is only supported for turn connectors');
     return true;
