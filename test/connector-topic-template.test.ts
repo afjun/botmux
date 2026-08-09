@@ -107,4 +107,41 @@ describe('connector trusted topic template', () => {
     expect(Array.from(message ?? '').length).toBeLessThanOrEqual(200);
     expect(message).toContain('<at user_id="ou_owner">owner@corp.com</at>负责人');
   });
+
+  it.each([4, 20])(
+    'keeps a prefix of %i resolved owners as complete native mentions',
+    async ownerCount => {
+      const connector = templateConnector();
+      connector.topicMessage = {
+        mode: 'template',
+        text: '{{mention owners}}负责人',
+        extractors: {
+          owners: { path: '$.owners', kind: 'mention', identityPath: '$.email', namePath: '$.name' },
+        },
+      };
+      const owners = Array.from({ length: ownerCount }, (_, index) => ({
+        email: `owner${index + 1}@corp.com`,
+        name: `Owner ${index + 1}`,
+      }));
+      const resolved = new Map(owners.map((owner, index) => [
+        owner.email,
+        `ou_${String(index + 1).padStart(2, '0')}${'a'.repeat(30)}`,
+      ]));
+
+      const message = await renderConnectorTopicTemplate(
+        connector,
+        { owners },
+        async () => resolved,
+      );
+
+      expect(Array.from(message ?? '')).toHaveLength(191);
+      expect(message).toBe(
+        `${owners.slice(0, 3).map(owner => (
+          `<at user_id="${resolved.get(owner.email)}">${owner.name}</at>`
+        )).join(' ')}负责人`,
+      );
+      expect((message?.match(/<at /g) ?? [])).toHaveLength(3);
+      expect(message).not.toContain('Owner 4');
+    },
+  );
 });

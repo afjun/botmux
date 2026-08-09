@@ -28,6 +28,7 @@ interface MentionRenderChunk {
   kind: 'mention';
   name: string;
   openId?: string;
+  separator?: string;
 }
 
 type RenderChunk = TextRenderChunk | MentionRenderChunk;
@@ -74,16 +75,14 @@ function truncateCodepoints(value: string, limit: number): string {
   return Array.from(value).slice(0, Math.max(0, limit)).join('');
 }
 
-function renderMentionWithin(chunk: MentionRenderChunk, budget: number): string {
+function renderMention(chunk: MentionRenderChunk): string {
   const name = truncateCodepoints(chunk.name, MAX_MENTION_NAME_CODEPOINTS);
-  if (budget <= 0 || !name) return '';
+  if (!name) return '';
+  const separator = chunk.separator ?? '';
   if (chunk.openId) {
-    const prefix = `<at user_id="${chunk.openId}">`;
-    const suffix = '</at>';
-    const nameBudget = budget - codepointLength(prefix) - codepointLength(suffix);
-    if (nameBudget > 0) return `${prefix}${truncateCodepoints(name, nameBudget)}${suffix}`;
+    return `${separator}<at user_id="${chunk.openId}">${name}</at>`;
   }
-  return truncateCodepoints(name, budget);
+  return `${separator}${name}`;
 }
 
 function appendStaticChunks(chunks: RenderChunk[], text: string, protectPostMention: boolean): void {
@@ -106,19 +105,18 @@ function limitedTopicMessage(chunks: RenderChunk[]): string {
 
   const mentions = chunks.filter((chunk): chunk is MentionRenderChunk => chunk.kind === 'mention');
   const mentionText = new Map<MentionRenderChunk, string>();
-  const desiredMentions = mentions.map(chunk => renderMentionWithin(chunk, Number.MAX_SAFE_INTEGER));
+  const desiredMentions = mentions.map(renderMention);
   const desiredMentionLength = desiredMentions.reduce((total, value) => total + codepointLength(value), 0);
   if (desiredMentionLength <= remainingBudget) {
     mentions.forEach((chunk, index) => mentionText.set(chunk, desiredMentions[index]));
     remainingBudget -= desiredMentionLength;
   } else {
-    let mentionsRemaining = mentions.length;
-    for (const chunk of mentions) {
-      const share = Math.floor(remainingBudget / Math.max(1, mentionsRemaining));
-      const rendered = renderMentionWithin(chunk, share);
+    for (const [index, chunk] of mentions.entries()) {
+      const rendered = desiredMentions[index];
+      const renderedLength = codepointLength(rendered);
+      if (renderedLength > remainingBudget) break;
       mentionText.set(chunk, rendered);
-      remainingBudget -= codepointLength(rendered);
-      mentionsRemaining -= 1;
+      remainingBudget -= renderedLength;
     }
   }
 
@@ -232,10 +230,10 @@ export async function renderConnectorTopicTemplate(
           : {}),
       };
     });
-    renderedMentions.forEach((value, position) => {
-      if (position > 0) chunks.push({ text: ' ', kind: 'protected' });
-      chunks.push(value);
-    });
+    renderedMentions.forEach((value, position) => chunks.push({
+      ...value,
+      ...(position > 0 ? { separator: ' ' } : {}),
+    }));
     cursor = index + match[0].length;
     previousTokenWasMention = true;
   }
