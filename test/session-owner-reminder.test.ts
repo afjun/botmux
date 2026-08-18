@@ -97,7 +97,12 @@ describe('SessionOwnerReminderController', () => {
 
     await controller.scan([ds], enabled, 10_000 + 30 * 60_000);
     expect(send).toHaveBeenCalledTimes(1);
-    expect(send).toHaveBeenLastCalledWith(ds, '请继续跟进。', expect.stringMatching(/^owner-reminder-/));
+    expect(send).toHaveBeenLastCalledWith(
+      ds,
+      '请继续跟进。',
+      expect.stringMatching(/^owner-reminder-/),
+      'ou_owner',
+    );
 
     await controller.scan([ds], enabled, 10_000 + 60 * 60_000);
     expect(send).toHaveBeenCalledTimes(2);
@@ -169,6 +174,14 @@ describe('SessionOwnerReminderController', () => {
     });
     const queued = session({ session: { ...session().session, sessionId: 'queued', queued: true } });
     const ownerless = session({ session: { ...session().session, sessionId: 'ownerless', ownerOpenId: undefined } });
+    const lastCallerFallback = session({
+      session: {
+        ...session().session,
+        sessionId: 'last-caller',
+        ownerOpenId: undefined,
+        lastCallerOpenId: 'ou_last_caller',
+      },
+    });
     const closed = session({ session: { ...session().session, sessionId: 'closed', status: 'closed' } });
     const noTransport = session({
       session: { ...session().session, sessionId: 'http' },
@@ -179,12 +192,13 @@ describe('SessionOwnerReminderController', () => {
       larkAppId: 'api_only',
     });
 
-    const all = [eligiblePty, eligibleTmux, queued, ownerless, closed, noTransport, apiOnly];
+    const all = [eligiblePty, eligibleTmux, queued, ownerless, lastCallerFallback, closed, noTransport, apiOnly];
     await controller.scan(all, enabled, 1_000);
     await controller.scan(all, enabled, 1_000 + 30 * 60_000);
-    expect(send).toHaveBeenCalledTimes(2);
-    expect(send.mock.calls.map(call => call[0].session.sessionId)).toEqual(['s1', 'tmux']);
-    expect(Object.keys(records).sort()).toEqual(['s1', 'tmux']);
+    expect(send).toHaveBeenCalledTimes(3);
+    expect(send.mock.calls.map(call => call[0].session.sessionId)).toEqual(['s1', 'tmux', 'last-caller']);
+    expect(send.mock.calls.map(call => call[3])).toEqual(['ou_owner', 'ou_owner', 'ou_last_caller']);
+    expect(Object.keys(records).sort()).toEqual(['last-caller', 's1', 'tmux']);
 
     await controller.scan(all, { ...enabled, enabled: false }, 1_000 + 31 * 60_000);
     expect(records).toEqual({});

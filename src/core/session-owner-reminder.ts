@@ -89,7 +89,7 @@ export function deriveSessionOwnerReminderStates(ds: DaemonSession): SessionOwne
 export interface SessionOwnerReminderControllerDeps {
   load(): SessionOwnerReminderRecords;
   save(records: SessionOwnerReminderRecords): void;
-  send(ds: DaemonSession, text: string, uuid: string): Promise<void>;
+  send(ds: DaemonSession, text: string, uuid: string, recipientOpenId: string): Promise<void>;
   canSend(ds: DaemonSession): boolean;
   onError?(ds: DaemonSession, error: unknown): void;
 }
@@ -132,10 +132,11 @@ export class SessionOwnerReminderController {
 
     for (const ds of sessions) {
       const sessionId = ds.session.sessionId;
+      const recipientOpenId = ds.session.ownerOpenId ?? ds.session.lastCallerOpenId;
       if (ds.session.status !== 'active'
         || ds.session.queued === true
         || (ds.scope ?? ds.session.scope) !== 'thread'
-        || !ds.session.ownerOpenId
+        || !recipientOpenId
         || !this.deps.canSend(ds)) {
         delete current[sessionId];
         continue;
@@ -176,6 +177,7 @@ export class SessionOwnerReminderController {
           ds,
           config.text,
           sessionOwnerReminderDeliveryUuid(sessionId, stateFingerprint, dueBase),
+          recipientOpenId,
         );
         record.lastRemindedAt = now;
         record.retryAfterAt = undefined;

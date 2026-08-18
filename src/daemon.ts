@@ -19284,11 +19284,11 @@ export async function startDaemon(botIndex?: number): Promise<void> {
       chatId: ds.chatId,
       apiOnly: getBot(ds.larkAppId).config.apiOnly,
     }),
-    send: async (ds, text, uuid) => {
+    send: async (ds, text, uuid, recipientOpenId) => {
       await sendSessionOwnerThreadNotification({
         larkAppId: ds.larkAppId,
         rootMessageId: ds.session.rootMessageId,
-        ownerOpenId: ds.session.ownerOpenId!,
+        ownerOpenId: recipientOpenId,
       }, text, uuid);
     },
     onError: (ds, error) => logger.warn(
