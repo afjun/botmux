@@ -36,6 +36,7 @@ export function requireConfigPath(): string {
 export async function rmwBotEntry<T>(
   larkAppId: string,
   mutate: (entry: any, raw: any[]) => { write: boolean; result: T } | T,
+  afterWrite?: (result: T) => void,
 ): Promise<{ ok: true; result: T } | { ok: false; reason: string }> {
   const path = requireConfigPath();
   return withFileLock(path, async () => {
@@ -47,9 +48,11 @@ export async function rmwBotEntry<T>(
     if (out && typeof out === 'object' && 'write' in (out as any)) {
       const wrap = out as { write: boolean; result: T };
       if (wrap.write) await writeRawConfigAtomic(path, raw);
+      afterWrite?.(wrap.result);
       return { ok: true, result: wrap.result };
     }
     await writeRawConfigAtomic(path, raw);
+    afterWrite?.(out as T);
     return { ok: true, result: out as T };
   });
 }

@@ -5,6 +5,7 @@ import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import {
   normalizeScheduleTimeZone,
+  resolveScheduleTimeZone,
   scheduleTimeZone,
   isValidTimeZone,
   hostLocalTimeZone,
@@ -97,8 +98,9 @@ describe('scheduleTimeZone — env → config → host precedence', () => {
     invalidateGlobalConfigCache();
   });
 
-  it('env override wins and is returned verbatim', () => {
+  it('env override wins and reports its source', () => {
     process.env[ENV] = 'Asia/Tokyo';
+    expect(resolveScheduleTimeZone()).toEqual({ timeZone: 'Asia/Tokyo', source: 'environment' });
     expect(scheduleTimeZone()).toBe('Asia/Tokyo');
   });
 
@@ -122,6 +124,7 @@ describe('scheduleTimeZone — env → config → host precedence', () => {
     );
     process.env.HOME = home;
     invalidateGlobalConfigCache();
+    expect(resolveScheduleTimeZone()).toEqual({ timeZone: 'Asia/Bangkok', source: 'settings' });
     expect(scheduleTimeZone()).toBe('Asia/Bangkok');
   });
 
@@ -130,6 +133,10 @@ describe('scheduleTimeZone — env → config → host precedence', () => {
     const home = mkdtempSync(join(tmpdir(), 'botmux-tz-'));
     process.env.HOME = home; // no config.json in this fresh home
     invalidateGlobalConfigCache();
+    expect(resolveScheduleTimeZone()).toEqual({
+      timeZone: hostLocalTimeZone(),
+      source: 'host',
+    });
     expect(scheduleTimeZone()).toBe(hostLocalTimeZone());
   });
 });

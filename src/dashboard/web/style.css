@@ -23189,6 +23189,215 @@ dialog select[multiple]:hover:not(:disabled) {
   resize: vertical;
 }
 
+.bot-defaults-page .bd-owner-reminder-window-section,
+.bot-defaults-page .bd-owner-reminder-days {
+  display: grid;
+  gap: 8px;
+}
+
+.bot-defaults-page .bd-owner-reminder-window-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.bot-defaults-page .bd-owner-reminder-window-heading .bd-subsection-title {
+  margin-right: auto;
+}
+
+.bot-defaults-page .bd-owner-reminder-window-heading :where(span, a) {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.bot-defaults-page .bd-owner-reminder-window-heading a {
+  color: var(--accent);
+}
+
+.bot-defaults-page .bd-owner-reminder-legacy {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 10px;
+  border: 1px solid color-mix(in srgb, var(--warning) 36%, var(--border-soft));
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--warning) 7%, var(--surface));
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.bot-defaults-page .bd-owner-reminder-legacy button,
+.bot-defaults-page .bd-owner-reminder-day-actions button,
+.bot-defaults-page .bd-owner-reminder-range > button {
+  min-height: var(--button-height);
+  padding: 0 var(--button-padding-x);
+  border-radius: var(--radius-full);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.bot-defaults-page .bd-owner-reminder-day {
+  min-width: 0;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.bot-defaults-page .bd-owner-reminder-day-summary {
+  display: grid;
+  grid-template-columns: minmax(60px, auto) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 42px;
+  margin: 0;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--fg);
+  text-align: left;
+  box-shadow: none;
+}
+
+.bot-defaults-page .bd-owner-reminder-day-summary > span:nth-child(2) {
+  min-width: 0;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bot-defaults-page .bd-owner-reminder-day-summary > span:last-child {
+  font-size: 18px;
+  transform: rotate(0deg);
+  transition: transform 220ms ease;
+}
+
+.bot-defaults-page .bd-owner-reminder-day.is-expanded .bd-owner-reminder-day-summary > span:last-child {
+  transform: rotate(90deg);
+}
+
+.bot-defaults-page .bd-owner-reminder-day-editor {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border-top: 1px solid var(--border-soft);
+  background: var(--surface-muted);
+  animation: bd-owner-reminder-reveal 320ms ease both;
+}
+
+@keyframes bd-owner-reminder-reveal {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.bot-defaults-page .bd-owner-reminder-range {
+  display: grid;
+  grid-template-columns: minmax(110px, 1fr) auto minmax(110px, 1fr) auto auto;
+  align-items: end;
+  gap: 8px;
+}
+
+.bot-defaults-page .bd-owner-reminder-range label {
+  display: grid;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.bot-defaults-page .bd-owner-reminder-range input[type="time"] {
+  box-sizing: border-box;
+  width: 100%;
+  height: var(--button-height);
+  padding: 0 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--fg);
+  font: 600 12px/1 var(--mono);
+}
+
+.bot-defaults-page .bd-owner-reminder-range-separator {
+  align-self: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.bot-defaults-page .bd-owner-reminder-end-day {
+  align-self: end;
+  min-width: 132px;
+  color: var(--accent);
+}
+
+.bot-defaults-page .bd-owner-reminder-day-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+dialog.bd-owner-reminder-copy-modal {
+  width: min(520px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  padding: 0;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  overflow: auto;
+}
+
+.bd-owner-reminder-copy-content {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+}
+
+.bd-owner-reminder-copy-modal .actions {
+  justify-content: flex-end;
+}
+
+.bd-owner-reminder-copy-modal h3 {
+  margin: 0;
+  text-align: center;
+}
+
+.bd-owner-reminder-copy-days {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.bd-owner-reminder-copy-days label {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--button-height);
+  padding: 0 var(--button-padding-x);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-full);
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.bd-owner-reminder-copy-days label:has(input:checked) {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+  color: var(--accent-strong);
+}
+
+.bd-owner-reminder-copy-days input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
 .bot-defaults-page .bd-owner-reminder-states {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -23205,6 +23414,33 @@ dialog select[multiple]:hover:not(:disabled) {
 
 @media (max-width: 620px) {
   .bot-defaults-page .bd-owner-reminder-states { grid-template-columns: 1fr; }
+
+  .bot-defaults-page .bd-owner-reminder-window-heading,
+  .bot-defaults-page .bd-owner-reminder-legacy {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .bot-defaults-page .bd-owner-reminder-window-heading .bd-subsection-title {
+    flex: 0 0 100%;
+  }
+
+  .bot-defaults-page .bd-owner-reminder-day-summary {
+    grid-template-columns: minmax(48px, auto) minmax(0, 1fr) auto;
+  }
+
+  .bot-defaults-page .bd-owner-reminder-range {
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    align-items: end;
+  }
+
+  .bot-defaults-page .bd-owner-reminder-range > button {
+    grid-column: span 1;
+  }
+
+  .bot-defaults-page .bd-owner-reminder-end-day {
+    min-width: 0;
+  }
 }
 
 .bot-defaults-page .bd-tile input[type="text"]:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=color]):not([type=file]):not([type=submit]):not([type=button]),
@@ -23746,6 +23982,14 @@ dialog.onboarding-dialog .onboarding-technical > code {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .bot-defaults-page .bd-owner-reminder-day-editor {
+    animation: none;
+  }
+
+  .bot-defaults-page .bd-owner-reminder-day-summary > span:last-child {
+    transition: none;
+  }
+
   dialog.onboarding-dialog .qr-card,
   dialog.onboarding-dialog .onboarding-status {
     transition-property: opacity;

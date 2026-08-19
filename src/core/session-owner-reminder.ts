@@ -1,23 +1,32 @@
 import { createHash } from 'node:crypto';
 import type { DaemonSession } from './types.js';
-
-export const SESSION_OWNER_REMINDER_STATES = [
-  'idle',
-  'dormant',
-  'pending_repo',
-  'tui_prompt',
-  'agent_attention',
-  'limited',
-] as const;
-
-export type SessionOwnerReminderState = typeof SESSION_OWNER_REMINDER_STATES[number];
-
-export interface SessionOwnerReminderConfig {
-  enabled: boolean;
-  intervalMinutes: number;
-  text: string;
-  states: SessionOwnerReminderState[];
-}
+export {
+  DEFAULT_SESSION_OWNER_REMINDER,
+  DEFAULT_SESSION_OWNER_REMINDER_WEEKLY_WINDOWS,
+  LEGACY_ALL_DAY_SESSION_OWNER_REMINDER_WEEKLY_WINDOWS,
+  SESSION_OWNER_REMINDER_SCHEMA_VERSION,
+  SESSION_OWNER_REMINDER_STATES,
+  SESSION_OWNER_REMINDER_WEEKDAYS,
+  buildSessionOwnerReminderCapability,
+  isPlainSessionOwnerReminderObject,
+  normalizeSessionOwnerReminderCapability,
+  normalizeSessionOwnerReminderConfig,
+  validateSessionOwnerReminderConfig,
+} from './session-owner-reminder-config.js';
+export type {
+  SessionOwnerReminderCapability,
+  SessionOwnerReminderConfig,
+  SessionOwnerReminderState,
+  SessionOwnerReminderTimeRange,
+  SessionOwnerReminderValidationResult,
+  SessionOwnerReminderWeekday,
+  SessionOwnerReminderWeeklyWindows,
+} from './session-owner-reminder-config.js';
+import {
+  type SessionOwnerReminderConfig,
+  type SessionOwnerReminderState,
+} from './session-owner-reminder-config.js';
+import { isSessionOwnerReminderWindowOpen } from './session-owner-reminder-window.js';
 
 export interface SessionOwnerReminderRecord {
   sessionId: string;
@@ -30,47 +39,7 @@ export interface SessionOwnerReminderRecord {
 
 export type SessionOwnerReminderRecords = Record<string, SessionOwnerReminderRecord>;
 
-export const DEFAULT_SESSION_OWNER_REMINDER: SessionOwnerReminderConfig = {
-  enabled: false,
-  intervalMinutes: 30,
-  text: '该会话已等待处理，请继续跟进。',
-  states: [...SESSION_OWNER_REMINDER_STATES],
-};
-
-const MIN_INTERVAL_MINUTES = 1;
-const MAX_INTERVAL_MINUTES = 10_080;
-const MAX_TEXT_CHARS = 500;
 const FAILURE_RETRY_MAX_MS = 5 * 60_000;
-
-function isState(value: unknown): value is SessionOwnerReminderState {
-  return typeof value === 'string'
-    && (SESSION_OWNER_REMINDER_STATES as readonly string[]).includes(value);
-}
-
-/** Strict normalizer shared by config loading and write validation. */
-export function normalizeSessionOwnerReminderConfig(
-  raw: unknown,
-): SessionOwnerReminderConfig | undefined {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
-  const value = raw as Record<string, unknown>;
-  if (typeof value.enabled !== 'boolean') return undefined;
-  if (!Number.isInteger(value.intervalMinutes)
-    || (value.intervalMinutes as number) < MIN_INTERVAL_MINUTES
-    || (value.intervalMinutes as number) > MAX_INTERVAL_MINUTES) return undefined;
-  if (typeof value.text !== 'string') return undefined;
-  const text = value.text.trim();
-  if (!text || Array.from(text).length > MAX_TEXT_CHARS || /<\s*at\b/i.test(text)) return undefined;
-  if (!Array.isArray(value.states)) return undefined;
-  const states = [...new Set(value.states.filter(isState))];
-  if (states.length !== value.states.length) return undefined;
-  if (value.enabled && states.length === 0) return undefined;
-  return {
-    enabled: value.enabled,
-    intervalMinutes: value.intervalMinutes as number,
-    text,
-    states,
-  };
-}
 
 export function deriveSessionOwnerReminderStates(ds: DaemonSession): SessionOwnerReminderState[] {
   const states: SessionOwnerReminderState[] = [];
@@ -91,6 +60,8 @@ export interface SessionOwnerReminderControllerDeps {
   save(records: SessionOwnerReminderRecords): void;
   send(ds: DaemonSession, text: string, uuid: string, recipientOpenId: string): Promise<void>;
   canSend(ds: DaemonSession): boolean;
+  now?(): number;
+  timeZone?(): string;
   onError?(ds: DaemonSession, error: unknown): void;
 }
 
@@ -112,13 +83,23 @@ export function sessionOwnerReminderDeliveryUuid(
 
 /** Durable, deterministic scan engine. Scheduling and Lark IO are injected. */
 export class SessionOwnerReminderController {
+  private generation = 0;
+
   constructor(private readonly deps: SessionOwnerReminderControllerDeps) {}
+
+  reset(): void {
+    this.generation++;
+    this.deps.save({});
+  }
 
   async scan(
     sessions: Iterable<DaemonSession>,
     config: SessionOwnerReminderConfig,
-    now: number = Date.now(),
+    nowOverride?: number,
   ): Promise<void> {
+    const scanGeneration = this.generation;
+    const readNow = nowOverride === undefined ? (this.deps.now ?? Date.now) : () => nowOverride;
+    let timeZone: string | undefined;
     const current = this.deps.load();
     const before = recordsSnapshot(current);
     if (!config.enabled || config.states.length === 0) {
@@ -131,6 +112,7 @@ export class SessionOwnerReminderController {
     const intervalMs = config.intervalMinutes * 60_000;
 
     for (const ds of sessions) {
+      const now = readNow();
       const sessionId = ds.session.sessionId;
       const recipientOpenId = ds.session.ownerOpenId ?? ds.session.lastCallerOpenId;
       if (ds.session.status !== 'active'
@@ -171,6 +153,11 @@ export class SessionOwnerReminderController {
       const dueBase = record.lastRemindedAt ?? record.actionableSince;
       if (now - dueBase < intervalMs) continue;
       if (record.retryAfterAt !== undefined && now < record.retryAfterAt) continue;
+      if (config.weeklyWindows) {
+        const sendNow = readNow();
+        timeZone ??= this.deps.timeZone?.() ?? 'UTC';
+        if (!isSessionOwnerReminderWindowOpen(config.weeklyWindows, timeZone, sendNow)) continue;
+      }
 
       try {
         await this.deps.send(
@@ -179,10 +166,12 @@ export class SessionOwnerReminderController {
           sessionOwnerReminderDeliveryUuid(sessionId, stateFingerprint, dueBase),
           recipientOpenId,
         );
-        record.lastRemindedAt = now;
+        if (scanGeneration !== this.generation) return;
+        record.lastRemindedAt = readNow();
         record.retryAfterAt = undefined;
       } catch (error) {
-        record.retryAfterAt = now + Math.max(60_000, Math.min(intervalMs, FAILURE_RETRY_MAX_MS));
+        if (scanGeneration !== this.generation) return;
+        record.retryAfterAt = readNow() + Math.max(60_000, Math.min(intervalMs, FAILURE_RETRY_MAX_MS));
         this.deps.onError?.(ds, error);
       }
     }
@@ -190,6 +179,8 @@ export class SessionOwnerReminderController {
     for (const sessionId of Object.keys(current)) {
       if (!seen.has(sessionId)) delete current[sessionId];
     }
-    if (recordsSnapshot(current) !== before) this.deps.save(current);
+    if (scanGeneration === this.generation && recordsSnapshot(current) !== before) {
+      this.deps.save(current);
+    }
   }
 }

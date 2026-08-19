@@ -7,6 +7,7 @@ import {
   deriveSessionOwnerReminderStates,
   normalizeSessionOwnerReminderConfig,
   sessionOwnerReminderDeliveryUuid,
+  type SessionOwnerReminderConfig,
   type SessionOwnerReminderRecord,
 } from '../src/core/session-owner-reminder.js';
 import { buildSessionOwnerMention } from '../src/services/session-owner-notification.js';
@@ -41,6 +42,13 @@ const enabled = {
   text: '请继续跟进。',
   states: ['idle'] as const,
 };
+
+function scheduled(
+  windows: SessionOwnerReminderConfig['weeklyWindows'],
+  intervalMinutes = 30,
+): SessionOwnerReminderConfig {
+  return { ...enabled, states: [...enabled.states], intervalMinutes, weeklyWindows: windows };
+}
 
 describe('session owner reminder configuration', () => {
   it('normalizes a valid per-Bot configuration and rejects unsafe mention markup', () => {
@@ -156,6 +164,98 @@ describe('SessionOwnerReminderController', () => {
     await controller.scan([due], enabled, 1_000 + 35 * 60_000);
     expect(send).toHaveBeenCalledTimes(2);
     expect(send.mock.calls[0][2]).toBe(send.mock.calls[1][2]);
+  });
+
+  it('keeps overdue records outside the window and sends only once when it opens', async () => {
+    let records: Record<string, SessionOwnerReminderRecord> = {};
+    const send = vi.fn().mockResolvedValue(undefined);
+    let now = Date.parse('2026-08-17T00:00:00Z'); // Monday 08:00 Asia/Shanghai
+    const controller = new SessionOwnerReminderController({
+      load: () => records,
+      save: next => { records = structuredClone(next); },
+      send,
+      canSend: () => true,
+      now: () => now,
+      timeZone: () => 'Asia/Shanghai',
+    });
+    const config = scheduled({
+      mon: [{ start: '10:30', end: '21:30' }],
+      tue: [], wed: [], thu: [], fri: [], sat: [], sun: [],
+    }, 30);
+    const ds = session({ lastMessageAt: now - 60_000 });
+
+    await controller.scan([ds], config);
+    now += 2 * 60 * 60_000;
+    await controller.scan([ds], config);
+    expect(send).not.toHaveBeenCalled();
+    expect(records.s1).toMatchObject({ actionableSince: Date.parse('2026-08-17T00:00:00Z') });
+
+    now = Date.parse('2026-08-17T02:30:00Z');
+    await controller.scan([ds], config);
+    expect(send).toHaveBeenCalledTimes(1);
+    await controller.scan([ds], config);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it('rechecks the window after a slow send crosses the closing boundary', async () => {
+    let records: Record<string, SessionOwnerReminderRecord> = {
+      first: {
+        sessionId: 'first', stateFingerprint: 'idle', actionableSince: 1,
+        lastObservedActivityAt: 0,
+      },
+      second: {
+        sessionId: 'second', stateFingerprint: 'idle', actionableSince: 1,
+        lastObservedActivityAt: 0,
+      },
+    };
+    let now = Date.parse('2026-08-17T13:29:00Z'); // Monday 21:29 Asia/Shanghai
+    const send = vi.fn().mockImplementation(async () => { now += 60_000; });
+    const controller = new SessionOwnerReminderController({
+      load: () => records,
+      save: next => { records = structuredClone(next); },
+      send,
+      canSend: () => true,
+      now: () => now,
+      timeZone: () => 'Asia/Shanghai',
+    });
+    const config = scheduled({
+      mon: [{ start: '10:30', end: '21:30' }],
+      tue: [], wed: [], thu: [], fri: [], sat: [], sun: [],
+    }, 1);
+    const first = session({ session: { ...session().session, sessionId: 'first' }, lastMessageAt: 0 });
+    const second = session({ session: { ...session().session, sessionId: 'second' }, lastMessageAt: 0 });
+
+    await controller.scan([first, second], config);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send.mock.calls[0][0].session.sessionId).toBe('first');
+    expect(records.second.lastRemindedAt).toBeUndefined();
+  });
+
+  it('reset invalidates an in-flight scan so old records cannot be restored', async () => {
+    let records: Record<string, SessionOwnerReminderRecord> = {
+      s1: {
+        sessionId: 's1', stateFingerprint: 'idle', actionableSince: 1,
+        lastObservedActivityAt: 0,
+      },
+    };
+    let releaseSend: (() => void) | undefined;
+    const send = vi.fn().mockImplementation(() => new Promise<void>((resolve) => { releaseSend = resolve; }));
+    const controller = new SessionOwnerReminderController({
+      load: () => structuredClone(records),
+      save: next => { records = structuredClone(next); },
+      send,
+      canSend: () => true,
+      now: () => 120_000,
+      timeZone: () => 'UTC',
+    });
+
+    const scan = controller.scan([session({ lastMessageAt: 0 })], scheduled(undefined, 1));
+    await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    controller.reset();
+    expect(records).toEqual({});
+    releaseSend?.();
+    await scan;
+    expect(records).toEqual({});
   });
 
   it('filters every ineligible session shape and clears records when disabled', async () => {

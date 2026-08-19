@@ -81,7 +81,11 @@ import { cleanupMaterializedDashboardImages, materializeDashboardImages } from '
 import { getCliDisplayName } from '../im/lark/card-builder.js';
 import { sessionConfiguredRuntimeDisplayName } from './cli-runtime-display.js';
 import { locateLimiter } from './dashboard-locate.js';
-import { DEFAULT_SESSION_OWNER_REMINDER } from './session-owner-reminder.js';
+import {
+  DEFAULT_SESSION_OWNER_REMINDER,
+  buildSessionOwnerReminderCapability,
+} from './session-owner-reminder.js';
+import { resolveScheduleTimeZone } from '../utils/timezone.js';
 import { updateSessionOwnerReminderConfig } from '../services/session-owner-reminder-config-store.js';
 import { sendSessionOwnerThreadNotification } from '../services/session-owner-notification.js';
 import { buildTerminalUrl } from './terminal-url.js';
@@ -130,6 +134,11 @@ let exactChatGrantHandler: typeof applyExactChatGrantRequest = applyExactChatGra
 export function setExactChatGrantHandler(handler: typeof applyExactChatGrantRequest | null): void {
   exactChatGrantHandler = handler ?? applyExactChatGrantRequest;
 }
+let sessionOwnerReminderResetHandler: (() => void) | null = null;
+export function setSessionOwnerReminderResetHandler(handler: (() => void) | null): void {
+  sessionOwnerReminderResetHandler = handler;
+}
+
 // 机器人真·改名 renamer，由 daemon 启动时注册（开放平台自动化 + daemon 侧
 // botName/descriptor/bots-info 同步都在 daemon 的闭包里做）。未注册（测试环境）
 // 时 PUT /api/bot-rename 降级为仅改 displayName。
@@ -2970,6 +2979,7 @@ ipcRoute('GET', '/api/bot-default-oncall', async (_req, res) => {
     displayName = bot.config.displayName ?? null;
     larkBotName = bot.botName ?? null;
   } catch { /* none */ }
+  const ownerReminderZone = resolveScheduleTimeZone();
   jsonRes(res, 200, {
     larkAppId: cachedLarkAppId,
     botName: getBotName(),
@@ -3023,6 +3033,10 @@ ipcRoute('GET', '/api/bot-default-oncall', async (_req, res) => {
     skillInjectionDefault: globalBuiltinSkillInjectionDefault(),
     maxLiveWorkers,
     sessionOwnerReminder,
+    sessionOwnerReminderCapability: buildSessionOwnerReminderCapability(
+      ownerReminderZone.timeZone,
+      ownerReminderZone.source,
+    ),
     logicalSessionCount,
     residentSessionCount,
     dormantSessionCount,
@@ -3725,9 +3739,19 @@ ipcRoute('PUT', '/api/bot-session-owner-reminder', async (req, res) => {
   let raw: unknown;
   try { raw = await readJsonBody(req); }
   catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
-  const result = await updateSessionOwnerReminderConfig(cachedLarkAppId, raw);
+  const result = await updateSessionOwnerReminderConfig(cachedLarkAppId, raw, () => {
+    sessionOwnerReminderResetHandler?.();
+  });
   if (!result.ok) return jsonRes(res, 400, { ok: false, error: result.reason });
-  return jsonRes(res, 200, { ok: true, sessionOwnerReminder: result.config });
+  const zone = resolveScheduleTimeZone();
+  return jsonRes(res, 200, {
+    ok: true,
+    sessionOwnerReminder: result.update.config,
+    sessionOwnerReminderCapability: buildSessionOwnerReminderCapability(
+      zone.timeZone,
+      zone.source,
+    ),
+  });
 });
 
 // Per-bot skill policy. Dashboard uses this for attach/detach; JSON policy

@@ -151,6 +151,41 @@ You can also add it to the corresponding bot entry directly (manual `bots.json` 
 | `messageQuota` | Message-quota switch `{ "defaultLimit": N }`: once a positive integer is configured, a `/grant` without a number applies an N-message quota; if not configured, authorization is unlimited. Only constrains talk authorization, does not affect `canOperate` |
 | `restrictGrantCommands` | When `true`, people granted only via per-user authorization (`chatGrants` / `globalGrants`) are disabled from **all slash commands** and can only have plain conversations; owner / `allowedUsers` / oncall / whole-group members are unaffected. Defaults to `false` |
 | `autoGrantRequestCards` | Enabled by default. Set to `false` to stop automatically sending `/grant` request cards to the owner when an unauthorized person or external bot @mentions this bot in a group and the talk gate blocks it; the message is dropped silently instead |
+| `sessionOwnerReminder` | Scheduled Session Owner reminder settings for Lark thread Sessions: switch, interval, text, states, and weekly windows. See below |
+
+### Session Owner reminders
+
+```json
+{
+  "sessionOwnerReminder": {
+    "enabled": true,
+    "intervalMinutes": 30,
+    "text": "This Session is waiting for attention. Please follow up.",
+    "states": ["idle", "dormant", "pending_repo", "tui_prompt", "agent_attention", "limited"],
+    "weeklyWindows": {
+      "mon": [{ "start": "10:30", "end": "21:30" }],
+      "tue": [{ "start": "10:30", "end": "21:30" }],
+      "wed": [{ "start": "10:30", "end": "21:30" }],
+      "thu": [{ "start": "10:30", "end": "21:30" }],
+      "fri": [{ "start": "10:30", "end": "21:30" }],
+      "sat": [],
+      "sun": []
+    }
+  }
+}
+```
+
+- New settings default to `10:30–21:30` Monday through Friday, with no weekend reminders. Each day supports up to 24 minute-level ranges.
+- Ranges are `[start, end)`: the start minute is included and the end minute is excluded. `00:00–24:00` means all day; an empty array disables that day.
+- A single range cannot cross midnight. Split Monday `22:00` through Tuesday `02:00` into Monday `22:00–24:00` plus Tuesday `00:00–02:00`.
+- Overlapping, contained, and duplicate ranges are valid. Runtime uses their union while preserving input order in configuration.
+- Windows use the global schedule timezone: `BOTMUX_SCHEDULE_TIMEZONE` → Dashboard global setting → host timezone. DST follows the real IANA wall clock.
+- Outside a window, delivery is suppressed but waiting time continues. When a window opens, an overdue Session receives one reminder only; missed cycles are not replayed.
+- Editing windows, timezone, interval, or text does not reset accumulated waiting time. Turning the feature off clears reminder state; turning it back on starts a fresh interval.
+- Botmux notifies the Owner, or the most recent caller if no Owner exists. The feature still applies only to active, non-queued, thread-scoped Sessions with Lark transport.
+- Pre-upgrade settings without `weeklyWindows` remain all-day, seven days a week; they are not silently migrated to the new default. Old daemons ignore this field and fall back to all-day delivery, so do not downgrade while relying on quiet hours.
+
+For everyday editing, use Dashboard **Bot configuration → Bot → Advanced → Session Owner reminders**. Dashboard saves hot-apply without a daemon restart; manual `bots.json` edits still require the restart described at the end of this page.
 
 ## File sandbox
 

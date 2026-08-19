@@ -144,7 +144,7 @@ import {
   isSessionTransferring,
   type WorkerSessionReplyOptions,
 } from './core/worker-pool.js';
-import { AbortDeadlineError, hasExactSafeJsonKeys, ipcRoute, isTrustedHostIpcRequest, JsonBodyTooLargeError, jsonRes, readJsonBody, runWithAbortDeadline, setBotName, setLarkAppId, startIpcServer, setBotRenamer, setBotAvatarChanger, armCoreOnlyReadinessGate, setCoreOnlyReady } from './core/dashboard-ipc-server.js';
+import { AbortDeadlineError, hasExactSafeJsonKeys, ipcRoute, isTrustedHostIpcRequest, JsonBodyTooLargeError, jsonRes, readJsonBody, runWithAbortDeadline, setBotName, setLarkAppId, startIpcServer, setBotRenamer, setBotAvatarChanger, setSessionOwnerReminderResetHandler, armCoreOnlyReadinessGate, setCoreOnlyReady } from './core/dashboard-ipc-server.js';
 import { setDeviceIsolationDaemonIdentity } from './core/device-isolation-daemon.js';
 import {
   cancelSessionReadyAck,
@@ -211,6 +211,7 @@ import {
   saveSessionOwnerReminderRecords,
 } from './services/session-owner-reminder-store.js';
 import { sendSessionOwnerThreadNotification } from './services/session-owner-notification.js';
+import { scheduleTimeZone } from './utils/timezone.js';
 import {
   getSessionPersistentBackendType,
   killPersistentBackendTarget,
@@ -18813,6 +18814,31 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   // SessionRow.botName.
   setBotName(cfg.displayName ?? cfg.larkAppId);
   setLarkAppId(cfg.larkAppId);
+
+  // Register before the dashboard IPC port opens: a disable PUT must reset the
+  // durable reminder cycle even during the startup window before periodic scans begin.
+  const sessionOwnerReminder = new SessionOwnerReminderController({
+    load: () => loadSessionOwnerReminderRecords(config.session.dataDir, cfg.larkAppId),
+    save: records => saveSessionOwnerReminderRecords(config.session.dataDir, cfg.larkAppId, records),
+    canSend: ds => larkTransportEnabled({
+      chatId: ds.chatId,
+      apiOnly: getBot(ds.larkAppId).config.apiOnly,
+    }),
+    timeZone: scheduleTimeZone,
+    send: async (ds, text, uuid, recipientOpenId) => {
+      await sendSessionOwnerThreadNotification({
+        larkAppId: ds.larkAppId,
+        rootMessageId: ds.session.rootMessageId,
+        ownerOpenId: recipientOpenId,
+      }, text, uuid);
+    },
+    onError: (ds, error) => logger.warn(
+      `[session-owner-reminder] send failed session=${ds.session.sessionId}: `
+      + `${error instanceof Error ? error.message : String(error)}`,
+    ),
+  });
+  setSessionOwnerReminderResetHandler(() => sessionOwnerReminder.reset());
+
   setDeviceIsolationDaemonIdentity({
     larkAppId: cfg.larkAppId,
     bootInstanceId: desc.bootInstanceId,
@@ -19277,25 +19303,6 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   }, 60_000);
   idleWorkerSweepTimer.unref?.();
 
-  const sessionOwnerReminder = new SessionOwnerReminderController({
-    load: () => loadSessionOwnerReminderRecords(config.session.dataDir, cfg.larkAppId),
-    save: records => saveSessionOwnerReminderRecords(config.session.dataDir, cfg.larkAppId, records),
-    canSend: ds => larkTransportEnabled({
-      chatId: ds.chatId,
-      apiOnly: getBot(ds.larkAppId).config.apiOnly,
-    }),
-    send: async (ds, text, uuid, recipientOpenId) => {
-      await sendSessionOwnerThreadNotification({
-        larkAppId: ds.larkAppId,
-        rootMessageId: ds.session.rootMessageId,
-        ownerOpenId: recipientOpenId,
-      }, text, uuid);
-    },
-    onError: (ds, error) => logger.warn(
-      `[session-owner-reminder] send failed session=${ds.session.sessionId}: `
-      + `${error instanceof Error ? error.message : String(error)}`,
-    ),
-  });
   let sessionOwnerReminderScanInFlight = false;
   const scanSessionOwnerReminders = async (): Promise<void> => {
     if (sessionOwnerReminderScanInFlight) return;
@@ -19519,6 +19526,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
     clearInterval(descriptorHeartbeat);
     clearInterval(idleWorkerSweepTimer);
     clearInterval(sessionOwnerReminderTimer);
+    setSessionOwnerReminderResetHandler(null);
     if (memoryDiagnostics) clearInterval(memoryDiagnostics);
     removeDaemonDescriptor(cfg.larkAppId);
     ipcHandle.close().catch(() => { /* swallow */ });
@@ -19594,6 +19602,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
     clearInterval(descriptorHeartbeat);
     clearInterval(idleWorkerSweepTimer);
     clearInterval(sessionOwnerReminderTimer);
+    setSessionOwnerReminderResetHandler(null);
     clearInterval(docCommentPollTimer);
     if (memoryDiagnostics) clearInterval(memoryDiagnostics);
     removeDaemonDescriptor(cfg.larkAppId);

@@ -25,6 +25,21 @@ import { useT } from './react-hooks.js';
 import { store } from './store.js';
 import type { RoleInjectMode } from './roles.js';
 import {
+  DEFAULT_SESSION_OWNER_REMINDER,
+  DEFAULT_SESSION_OWNER_REMINDER_WEEKLY_WINDOWS,
+  LEGACY_ALL_DAY_SESSION_OWNER_REMINDER_WEEKLY_WINDOWS,
+  MAX_SESSION_OWNER_REMINDER_RANGES_PER_DAY,
+  createDefaultSessionOwnerReminderRange,
+  SESSION_OWNER_REMINDER_SCHEMA_VERSION,
+  SESSION_OWNER_REMINDER_WEEKDAYS,
+  normalizeSessionOwnerReminderCapability,
+  validateSessionOwnerReminderConfig,
+  type SessionOwnerReminderConfig,
+  type SessionOwnerReminderTimeRange,
+  type SessionOwnerReminderWeekday,
+  type SessionOwnerReminderWeeklyWindows,
+} from '../../core/session-owner-reminder-config.js';
+import {
   CreateActionButton,
   DropdownMenu,
   Html,
@@ -503,6 +518,7 @@ export function BotDefaultsPage() {
   // refresh()es can overlap, so a slow earlier response must not clobber a
   // newer roster ("后发先回"). Only the latest in-flight request commits.
   const refreshGateRef = useRef(createRefreshGate());
+  const mutationVersionRef = useRef(0);
   const [bots, setBots] = useState<BotDefaultsRow[]>([]);
   const [cliState, setCliState] = useState<CliOptionsState>(fallbackCliOptionsState);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -518,6 +534,7 @@ export function BotDefaultsPage() {
   const refresh = useCallback(async (clearProfileRoles = false) => {
     if (clearProfileRoles) setProfileRoleVersion(version => version + 1);
     const req = refreshGateRef.current.begin();
+    const mutationVersion = mutationVersionRef.current;
     setLoading(true);
     try {
       const [nextBots, nextCli] = await Promise.all([fetchBotDefaults(), fetchCliOptions()]);
@@ -525,6 +542,15 @@ export function BotDefaultsPage() {
       // bots.changed fired while this request was in flight) — committing here
       // would overwrite the fresher roster and re-hide the new bot.
       if (!mountedRef.current || !req.commit()) return;
+      // A save completed after this GET started. Its authoritative PUT echo is
+      // newer than this snapshot, so discard the stale roster and refetch.
+      if (mutationVersion !== mutationVersionRef.current) {
+        const next = mutationVersionRef.current;
+        queueMicrotask(() => {
+          if (mountedRef.current && next === mutationVersionRef.current) void refresh();
+        });
+        return;
+      }
       setBots(nextBots.bots);
       setLoadError(nextBots.error);
       setCliState(nextCli);
@@ -574,6 +600,7 @@ export function BotDefaultsPage() {
   const selectedBot = selectedAppId ? filtered.find(bot => bot.larkAppId === selectedAppId) ?? null : null;
 
   const patchBot = useCallback<PatchBot>((appId, patch) => {
+    mutationVersionRef.current++;
     setBots(rows => rows.map(bot => {
       if (bot.larkAppId !== appId) return bot;
       return typeof patch === 'function' ? patch(bot) : { ...bot, ...patch };
@@ -846,7 +873,9 @@ function BotDefaultsCard(props: {
               <section className="bd-tile"><CodexAppDisplaySection bot={bot} putCardPref={putCardPref} /></section>
             ) : null}
             <section className="bd-tile"><RuntimeEnvironmentSection bot={bot} patchBot={patchBot} /></section>
-            <section className="bd-tile"><SessionOwnerReminderSection bot={bot} patchBot={patchBot} /></section>
+            {bot.larkTransportEnabled !== false ? (
+              <section className="bd-tile"><SessionOwnerReminderSection bot={bot} patchBot={patchBot} /></section>
+            ) : null}
           </BdTabGrid>
         </div>
       </div>
@@ -875,32 +904,145 @@ const OWNER_REMINDER_STATE_OPTIONS = [
   { value: 'limited', labelKey: 'botDefaults.ownerReminderStateLimited' },
 ] as const;
 
-// Offline/error rows can lack the daemon-provided default payload. Keep this
-// browser fallback aligned with DEFAULT_SESSION_OWNER_REMINDER.
-const DEFAULT_OWNER_REMINDER = {
-  enabled: false,
-  intervalMinutes: 30,
-  text: '该会话已等待处理，请继续跟进。',
-  states: OWNER_REMINDER_STATE_OPTIONS.map(option => option.value),
+const OWNER_REMINDER_WEEKDAY_KEYS: Record<SessionOwnerReminderWeekday, string> = {
+  mon: 'botDefaults.ownerReminderMonday',
+  tue: 'botDefaults.ownerReminderTuesday',
+  wed: 'botDefaults.ownerReminderWednesday',
+  thu: 'botDefaults.ownerReminderThursday',
+  fri: 'botDefaults.ownerReminderFriday',
+  sat: 'botDefaults.ownerReminderSaturday',
+  sun: 'botDefaults.ownerReminderSunday',
 };
 
-function SessionOwnerReminderSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
+type EditableWeeklyWindows = Record<SessionOwnerReminderWeekday, SessionOwnerReminderTimeRange[]>;
+
+function cloneWeeklyWindows(value: SessionOwnerReminderWeeklyWindows): EditableWeeklyWindows {
+  return structuredClone(value) as EditableWeeklyWindows;
+}
+
+function initialOwnerReminder(bot: BotDefaultsRow): {
+  config: SessionOwnerReminderConfig;
+  legacy: boolean;
+} {
+  const raw = bot.sessionOwnerReminder ?? DEFAULT_SESSION_OWNER_REMINDER;
+  const legacy = !raw.weeklyWindows;
+  return {
+    config: {
+      ...raw,
+      states: [...raw.states],
+      weeklyWindows: cloneWeeklyWindows(
+        raw.weeklyWindows ?? LEGACY_ALL_DAY_SESSION_OWNER_REMINDER_WEEKLY_WINDOWS,
+      ),
+    },
+    legacy,
+  };
+}
+
+function ownerReminderRangeSummary(
+  ranges: SessionOwnerReminderTimeRange[],
+  off: string,
+  moreCount: (count: number) => string,
+): string {
+  if (ranges.length === 0) return off;
+  const visible = ranges.slice(0, 2).map(range => `${range.start}–${range.end}`).join('、');
+  return ranges.length > 2 ? `${visible} · ${moreCount(ranges.length - 2)}` : visible;
+}
+
+function OwnerReminderCopyModal(props: {
+  source: SessionOwnerReminderWeekday;
+  windows: SessionOwnerReminderWeeklyWindows;
+  disabled: boolean;
+  onConfirm(targets: SessionOwnerReminderWeekday[]): void;
+  onClose(): void;
+}) {
   const tr = useT();
-  const initial = props.bot.sessionOwnerReminder ?? DEFAULT_OWNER_REMINDER;
-  const [enabled, setEnabled] = useState(initial.enabled === true);
-  const [interval, setIntervalValue] = useState(String(initial.intervalMinutes));
-  const [text, setText] = useState(initial.text);
-  const [states, setStates] = useState<OwnerReminderState[]>([...initial.states]);
+  const dialogRef = useRef<HTMLDialogElement | null>(null);
+  const [targets, setTargets] = useState<SessionOwnerReminderWeekday[]>([]);
+  const occupied = targets.filter(weekday => props.windows[weekday].length > 0);
+  useEffect(() => {
+    dialogRef.current?.showModal();
+    return () => dialogRef.current?.close();
+  }, []);
+  return (
+    <dialog
+      ref={dialogRef}
+      className="bd-owner-reminder-copy-modal"
+      aria-labelledby="owner-reminder-copy-title"
+      onCancel={event => { event.preventDefault(); if (!props.disabled) props.onClose(); }}
+      onClick={event => { if (event.currentTarget === event.target && !props.disabled) props.onClose(); }}
+    >
+      <div className="bd-owner-reminder-copy-content">
+        <h3 id="owner-reminder-copy-title">{tr('botDefaults.ownerReminderCopyTitle')}</h3>
+        <div className="bd-owner-reminder-copy-days">
+          {SESSION_OWNER_REMINDER_WEEKDAYS.filter(weekday => weekday !== props.source).map(weekday => (
+            <label key={weekday}>
+              <input
+                type="checkbox"
+                data-copy-target={weekday}
+                checked={targets.includes(weekday)}
+                disabled={props.disabled}
+                onChange={event => setTargets(current => event.currentTarget.checked
+                  ? [...current, weekday]
+                  : current.filter(value => value !== weekday))}
+              />
+              <span>{tr(OWNER_REMINDER_WEEKDAY_KEYS[weekday])}</span>
+            </label>
+          ))}
+        </div>
+        {occupied.length > 0 ? (
+          <p className="hint-warn">{tr('botDefaults.ownerReminderCopyOverwrite', {
+            days: occupied.map(weekday => tr(OWNER_REMINDER_WEEKDAY_KEYS[weekday])).join('、'),
+          })}</p>
+        ) : null}
+        <div className="actions">
+          <button type="button" disabled={props.disabled} onClick={props.onClose}>{tr('botDefaults.renameCancel')}</button>
+          <button
+            type="button"
+            className="primary"
+            data-action="confirm-copy-owner-reminder-day"
+            disabled={props.disabled || targets.length === 0}
+            onClick={() => props.onConfirm(targets)}
+          >{tr('botDefaults.ownerReminderCopyConfirm')}</button>
+        </div>
+      </div>
+    </dialog>
+  );
+}
+
+export function SessionOwnerReminderSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
+  const tr = useT();
+  const initial = initialOwnerReminder(props.bot);
+  const [enabled, setEnabled] = useState(initial.config.enabled === true);
+  const [interval, setIntervalValue] = useState(String(initial.config.intervalMinutes));
+  const [text, setText] = useState(initial.config.text);
+  const [states, setStates] = useState<OwnerReminderState[]>([...initial.config.states]);
+  const [weeklyWindows, setWeeklyWindows] = useState(() => cloneWeeklyWindows(initial.config.weeklyWindows!));
+  const [legacy, setLegacy] = useState(initial.legacy);
+  const [expandedDay, setExpandedDay] = useState<SessionOwnerReminderWeekday | null>(null);
+  const [copyDay, setCopyDay] = useState<SessionOwnerReminderWeekday | null>(null);
+  const requestIdRef = useRef(0);
+  const botIdRef = useRef(props.bot.larkAppId);
+  botIdRef.current = props.bot.larkAppId;
   const [status, setStatus] = useState<StatusMessage>(null);
   const [busy, setBusy] = useState(false);
+  const capability = props.bot.sessionOwnerReminderCapability;
+  const supported = (capability?.schemaVersion ?? 0) >= SESSION_OWNER_REMINDER_SCHEMA_VERSION;
+  const readOnly = busy || !supported;
 
   useEffect(() => {
-    const next = props.bot.sessionOwnerReminder ?? DEFAULT_OWNER_REMINDER;
-    setEnabled(next.enabled === true);
-    setIntervalValue(String(next.intervalMinutes));
-    setText(next.text);
-    setStates([...next.states]);
-  }, [props.bot.sessionOwnerReminder]);
+    requestIdRef.current++;
+    const next = initialOwnerReminder(props.bot);
+    setEnabled(next.config.enabled === true);
+    setIntervalValue(String(next.config.intervalMinutes));
+    setText(next.config.text);
+    setStates([...next.config.states]);
+    setWeeklyWindows(cloneWeeklyWindows(next.config.weeklyWindows!));
+    setLegacy(next.legacy);
+    setExpandedDay(null);
+    setCopyDay(null);
+  }, [props.bot.sessionOwnerReminder, props.bot.larkAppId]);
+
+  if (props.bot.larkTransportEnabled === false) return null;
 
   function toggleState(state: OwnerReminderState, checked: boolean): void {
     setStates(current => checked
@@ -908,50 +1050,95 @@ function SessionOwnerReminderSection(props: { bot: BotDefaultsRow; patchBot: Pat
       : current.filter(item => item !== state));
   }
 
+  function patchDay(
+    weekday: SessionOwnerReminderWeekday,
+    update: (ranges: SessionOwnerReminderTimeRange[]) => SessionOwnerReminderTimeRange[],
+  ): void {
+    setLegacy(false);
+    setWeeklyWindows(current => ({ ...current, [weekday]: update(current[weekday]) }));
+  }
+
+  function updateRange(
+    weekday: SessionOwnerReminderWeekday,
+    index: number,
+    field: 'start' | 'end',
+    value: string,
+  ): void {
+    patchDay(weekday, ranges => ranges.map((range, current) => (
+      current === index ? { ...range, [field]: value } : range
+    )));
+  }
+
+  function validationText(result: Exclude<ReturnType<typeof validateSessionOwnerReminderConfig>, { ok: true }>): string {
+    if (result.code === 'interval_invalid') return tr('botDefaults.ownerReminderIntervalInvalid');
+    if (result.code === 'text_invalid') return tr('botDefaults.ownerReminderTextInvalid');
+    if (result.code === 'states_empty' || result.code === 'states_invalid') return tr('botDefaults.ownerReminderStatesInvalid');
+    if (result.code === 'weekly_windows_empty') return tr('botDefaults.ownerReminderWindowsEmpty');
+    if (result.code === 'too_many_ranges') return tr('botDefaults.ownerReminderTooManyRanges');
+    return tr('botDefaults.ownerReminderRangeInvalid');
+  }
+
   async function save(): Promise<void> {
-    const minutes = Number(interval);
-    const cleanText = text.trim();
-    if (!Number.isInteger(minutes) || minutes < 1 || minutes > 10_080) {
-      setStatus({ text: `✗ ${tr('botDefaults.ownerReminderIntervalInvalid')}` });
+    if (!supported) return;
+    const payload: SessionOwnerReminderConfig = {
+      enabled,
+      intervalMinutes: Number(interval),
+      text: text.trim(),
+      states,
+      weeklyWindows,
+    };
+    const validated = validateSessionOwnerReminderConfig(payload);
+    if (!validated.ok) {
+      if (validated.weekday) setExpandedDay(validated.weekday);
+      setStatus({ text: `✗ ${validationText(validated)}` });
       return;
     }
-    if (!cleanText || Array.from(cleanText).length > 500 || /<\s*at\b/i.test(cleanText)) {
-      setStatus({ text: `✗ ${tr('botDefaults.ownerReminderTextInvalid')}` });
-      return;
-    }
-    if (enabled && states.length === 0) {
-      setStatus({ text: `✗ ${tr('botDefaults.ownerReminderStatesInvalid')}` });
-      return;
-    }
+    const botId = props.bot.larkAppId;
+    const requestId = ++requestIdRef.current;
     setBusy(true);
     setStatus(null);
     try {
-      const payload = { enabled, intervalMinutes: minutes, text: cleanText, states };
       const res = await sendJson(
         'PUT',
         `/api/bots/${encodeURIComponent(props.bot.larkAppId)}/session-owner-reminder`,
-        payload,
+        validated.config,
       );
-      if (res.ok && res.body.ok) {
-        const next = res.body.sessionOwnerReminder ?? payload;
-        props.patchBot(props.bot.larkAppId, { sessionOwnerReminder: next });
+      if (requestId !== requestIdRef.current || botId !== botIdRef.current) return;
+      const returnedCapability = normalizeSessionOwnerReminderCapability(
+        res.body.sessionOwnerReminderCapability,
+      );
+      const returned = validateSessionOwnerReminderConfig(res.body.sessionOwnerReminder);
+      if (res.ok && res.body.ok
+        && (returnedCapability?.schemaVersion ?? 0) >= SESSION_OWNER_REMINDER_SCHEMA_VERSION
+        && returned.ok && returned.config.weeklyWindows) {
+        props.patchBot(props.bot.larkAppId, {
+          sessionOwnerReminder: returned.config,
+          sessionOwnerReminderCapability: returnedCapability,
+        });
+        setLegacy(false);
         setStatus({ text: `✓ ${tr('botDefaults.cardPrefSaved')}`, ok: true });
+      } else if (res.ok && res.body.ok) {
+        setStatus({ text: `✗ ${tr('botDefaults.ownerReminderUpgradeRequired')}` });
       } else {
         setStatus({ text: `✗ ${responseErrorText(res)}` });
       }
     } catch (error: any) {
-      setStatus({ text: `✗ ${caughtErrorText(error)}` });
+      if (requestId === requestIdRef.current && botId === botIdRef.current) {
+        setStatus({ text: `✗ ${caughtErrorText(error)}` });
+      }
     } finally {
-      setBusy(false);
+      if (requestId === requestIdRef.current && botId === botIdRef.current) setBusy(false);
     }
   }
 
   return (
     <section className="bd-section bd-owner-reminder">
       <h3 className="bd-section-title"><FieldTitle help={tr('botDefaults.ownerReminderHelp')}>{tr('botDefaults.ownerReminderTitle')}</FieldTitle></h3>
+      {!supported ? <p className="hint-warn" data-owner-reminder-upgrade="">{tr('botDefaults.ownerReminderUpgradeRequired')}</p> : null}
+      {!enabled ? <p className="muted">{tr('botDefaults.ownerReminderDisabledHint')}</p> : null}
       <ToggleRow
         checked={enabled}
-        disabled={busy}
+        disabled={readOnly}
         dataAction="toggle-owner-reminder"
         title={tr('botDefaults.ownerReminderEnabled')}
         help={tr('botDefaults.ownerReminderEnabledHelp')}
@@ -960,15 +1147,94 @@ function SessionOwnerReminderSection(props: { bot: BotDefaultsRow; patchBot: Pat
       <div className="bd-row">
         <label>
           <span>{tr('botDefaults.ownerReminderInterval')}</span>
-          <input type="number" min={1} max={10080} step={1} data-input="ownerReminderInterval" value={interval} disabled={busy} onChange={event => setIntervalValue(event.currentTarget.value)} />
+          <input type="number" min={1} max={10080} step={1} data-input="ownerReminderInterval" value={interval} disabled={readOnly} onChange={event => setIntervalValue(event.currentTarget.value)} />
         </label>
+      </div>
+      <div className="bd-subsection bd-owner-reminder-window-section">
+        <div className="bd-owner-reminder-window-heading">
+          <h4 className="bd-subsection-title">{tr('botDefaults.ownerReminderWindows')}</h4>
+          <span data-owner-reminder-timezone="">
+            {capability?.effectiveTimeZone ?? '—'} · {capability
+              ? tr(`botDefaults.ownerReminderTimeZoneSource.${capability.timeZoneSource}`)
+              : '—'}
+          </span>
+          <a href="#/settings" title={capability?.timeZoneSource === 'environment'
+            ? tr('botDefaults.ownerReminderTimeZoneEnvironmentHint')
+            : undefined}>{tr('botDefaults.ownerReminderGlobalSettings')}</a>
+        </div>
+        {legacy ? (
+          <div className="bd-owner-reminder-legacy" data-owner-reminder-legacy="">
+            <span>{tr('botDefaults.ownerReminderLegacy')}</span>
+            <button type="button" disabled={readOnly} onClick={() => {
+              setWeeklyWindows(cloneWeeklyWindows(DEFAULT_SESSION_OWNER_REMINDER_WEEKLY_WINDOWS));
+              setLegacy(false);
+            }}>{tr('botDefaults.ownerReminderUseDefault')}</button>
+          </div>
+        ) : null}
+        <div className="bd-owner-reminder-days">
+          {SESSION_OWNER_REMINDER_WEEKDAYS.map(weekday => {
+            const ranges = weeklyWindows[weekday];
+            const expanded = expandedDay === weekday;
+            return (
+              <div className={`bd-owner-reminder-day${expanded ? ' is-expanded' : ''}`} key={weekday}>
+                <button
+                  type="button"
+                  className="bd-owner-reminder-day-summary"
+                  data-owner-reminder-day={weekday}
+                  aria-expanded={expanded}
+                  aria-controls={`owner-reminder-${weekday}`}
+                  onClick={() => setExpandedDay(expanded ? null : weekday)}
+                >
+                  <strong>{tr(OWNER_REMINDER_WEEKDAY_KEYS[weekday])}</strong>
+                  <span>{ownerReminderRangeSummary(
+                    ranges,
+                    tr('botDefaults.ownerReminderDayOff'),
+                    count => tr('botDefaults.ownerReminderMoreRanges', { count }),
+                  )}</span>
+                  <span aria-hidden="true">›</span>
+                </button>
+                {expanded ? (
+                  <div className="bd-owner-reminder-day-editor" id={`owner-reminder-${weekday}`}>
+                    {ranges.map((range, index) => (
+                      <div className="bd-owner-reminder-range" data-owner-reminder-range={index} key={`${weekday}-${index}`}>
+                        <label>
+                          <span>{tr('botDefaults.ownerReminderStart')}</span>
+                          <input type="time" step={60} value={range.start} disabled={readOnly} onChange={event => updateRange(weekday, index, 'start', event.currentTarget.value)} />
+                        </label>
+                        <span className="bd-owner-reminder-range-separator">{tr('botDefaults.ownerReminderTo')}</span>
+                        {range.end === '24:00' ? (
+                          <button type="button" className="bd-owner-reminder-end-day" data-owner-reminder-end="" disabled={readOnly} onClick={() => updateRange(weekday, index, 'end', '21:30')}>
+                            24:00 · {tr('botDefaults.ownerReminderEndOfDay')}
+                          </button>
+                        ) : (
+                          <label>
+                            <span>{tr('botDefaults.ownerReminderEnd')}</span>
+                            <input type="time" step={60} value={range.end} disabled={readOnly} onChange={event => updateRange(weekday, index, 'end', event.currentTarget.value)} />
+                          </label>
+                        )}
+                        {range.end !== '24:00' ? (
+                          <button type="button" data-action="owner-reminder-end-of-day" disabled={readOnly} onClick={() => updateRange(weekday, index, 'end', '24:00')}>{tr('botDefaults.ownerReminderEndOfDay')}</button>
+                        ) : null}
+                        <button type="button" className="danger" disabled={readOnly} aria-label={tr('botDefaults.ownerReminderDeleteRange')} onClick={() => patchDay(weekday, current => current.filter((_, item) => item !== index))}>×</button>
+                      </div>
+                    ))}
+                    <div className="bd-owner-reminder-day-actions">
+                      <button type="button" data-action="add-owner-reminder-range" disabled={readOnly || ranges.length >= MAX_SESSION_OWNER_REMINDER_RANGES_PER_DAY} onClick={() => patchDay(weekday, current => [...current, createDefaultSessionOwnerReminderRange()])}>+ {tr('botDefaults.ownerReminderAddRange')}</button>
+                      <button type="button" data-action="copy-owner-reminder-day" disabled={readOnly} onClick={() => setCopyDay(weekday)}>{tr('botDefaults.ownerReminderCopyDay')}</button>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
+        </div>
       </div>
       <div className="bd-subsection">
         <h4 className="bd-subsection-title">{tr('botDefaults.ownerReminderStates')}</h4>
         <div className="bd-owner-reminder-states">
           {OWNER_REMINDER_STATE_OPTIONS.map(option => (
             <label key={option.value}>
-              <input type="checkbox" checked={states.includes(option.value)} disabled={busy} onChange={event => toggleState(option.value, event.currentTarget.checked)} />
+              <input type="checkbox" checked={states.includes(option.value)} disabled={readOnly} onChange={event => toggleState(option.value, event.currentTarget.checked)} />
               <span>{tr(option.labelKey)}</span>
             </label>
           ))}
@@ -977,13 +1243,31 @@ function SessionOwnerReminderSection(props: { bot: BotDefaultsRow; patchBot: Pat
       <div className="bd-row">
         <label>
           <span><FieldTitle help={tr('botDefaults.ownerReminderTextHelp')}>{tr('botDefaults.ownerReminderText')}</FieldTitle></span>
-          <textarea rows={3} maxLength={500} data-input="ownerReminderText" value={text} disabled={busy} onChange={event => setText(event.currentTarget.value)} />
+          <textarea rows={3} maxLength={500} data-input="ownerReminderText" value={text} disabled={readOnly} onChange={event => setText(event.currentTarget.value)} />
         </label>
       </div>
       <div className="actions">
-        <button type="button" className="primary" data-action="save-owner-reminder" disabled={busy} onClick={() => void save()}>{tr('botDefaults.ownerReminderSave')}</button>
+        <button type="button" className="primary" data-action="save-owner-reminder" disabled={readOnly} onClick={() => void save()}>{tr('botDefaults.ownerReminderSave')}</button>
         <StatusSpan status={status} attr={{ 'data-owner-reminder-status': '' }} />
       </div>
+      {copyDay ? (
+        <OwnerReminderCopyModal
+          source={copyDay}
+          windows={weeklyWindows}
+          disabled={busy}
+          onClose={() => setCopyDay(null)}
+          onConfirm={targets => {
+            const sourceRanges = weeklyWindows[copyDay].map(range => ({ ...range }));
+            setWeeklyWindows(current => {
+              const next = cloneWeeklyWindows(current);
+              for (const target of targets) next[target] = sourceRanges.map(range => ({ ...range }));
+              return next;
+            });
+            setLegacy(false);
+            setCopyDay(null);
+          }}
+        />
+      ) : null}
     </section>
   );
 }

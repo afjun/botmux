@@ -24,9 +24,24 @@ describe('dashboard bot payload helpers', () => {
       'regularGroupReplyMode', 'restrictGrantCommands', 'riff', 'sandbox', 'sandboxPaths',
       'silentTurnReactions', 'skillInjection', 'startupCommands', 'substituteMode',
       'summaryMemory', 'summaryMemoryPath', 'summaryRange', 'writableTerminalLinkInCard',
-      'sessionOwnerReminder',
+      'sessionOwnerReminder', 'sessionOwnerReminderCapability',
     ];
     expect(Object.keys(row)).toEqual(expect.arrayContaining(editableFields));
+  });
+
+  it('passes through reminder schema capability and configured Lark transport facts', () => {
+    const capability = {
+      schemaVersion: 2,
+      effectiveTimeZone: 'Asia/Shanghai',
+      timeZoneSource: 'settings',
+    };
+    expect(botDefaultsPayload(
+      { larkAppId: 'app_contract', larkTransportEnabled: false },
+      { sessionOwnerReminderCapability: capability },
+    )).toMatchObject({
+      larkTransportEnabled: false,
+      sessionOwnerReminderCapability: capability,
+    });
   });
 
   it('keeps executable runtime details out of public group roster summaries', () => {

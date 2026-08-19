@@ -1,3 +1,6 @@
+import {
+  normalizeSessionOwnerReminderCapability,
+} from '../core/session-owner-reminder-config.js';
 import { defaultSummaryRangePrefs, summaryRangeFromLegacyContentTriggers } from '../services/summary-range-store.js';
 import { selectionKeyForBot } from '../setup/cli-selection.js';
 import { normalizeUsageDisplay } from '../bot-registry.js';
@@ -13,6 +16,7 @@ export interface DashboardBotDescriptor {
   cliPathOverride?: string;
   wrapperCli?: string;
   model?: string;
+  larkTransportEnabled?: boolean;
 }
 
 export function botSummaryPayload(bot: DashboardBotDescriptor) {
@@ -33,6 +37,9 @@ export function botDefaultsPayload(bot: DashboardBotDescriptor, j?: any, error?:
     ...(bot.cliPathOverride ? { cliPathOverride: bot.cliPathOverride } : {}),
     ...(bot.wrapperCli ? { wrapperCli: bot.wrapperCli } : {}),
     ...(bot.model ? { model: bot.model } : {}),
+    ...(typeof bot.larkTransportEnabled === 'boolean'
+      ? { larkTransportEnabled: bot.larkTransportEnabled }
+      : {}),
     // 「修改 CLI」下拉的当前选中项（cliId+wrapperCli → 选择键），wrapper 网关形态
     // （aiden×claude / ttadk×codex 等）据此才能高亮回对应选项，否则前端回落到裸
     // cliId、丢失 wrapper 语义（重载后下拉复位、再保存会把 wrapper 剥掉）。
@@ -101,6 +108,9 @@ export function botDefaultsPayload(bot: DashboardBotDescriptor, j?: any, error?:
     sessionOwnerReminder: j?.sessionOwnerReminder && typeof j.sessionOwnerReminder === 'object'
       ? j.sessionOwnerReminder
       : null,
+    sessionOwnerReminderCapability: normalizeSessionOwnerReminderCapability(
+      j?.sessionOwnerReminderCapability,
+    ) ?? null,
     startupCommands: typeof j?.startupCommands === 'string' ? j.startupCommands : '',
     customPassthroughCommands: typeof j?.customPassthroughCommands === 'string' ? j.customPassthroughCommands : '',
     canTalkDaemonCommands: typeof j?.canTalkDaemonCommands === 'string' ? j.canTalkDaemonCommands : '',

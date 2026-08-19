@@ -474,7 +474,7 @@ describe('bot-config store', () => {
       states: ['idle', 'tui_prompt'],
     };
     const saved = await reminderStore.updateSessionOwnerReminderConfig('app_default', value);
-    expect(saved).toEqual({ ok: true, config: value });
+    expect(saved).toEqual({ ok: true, update: { config: value, shouldReset: false } });
     expect(readConfig().sessionOwnerReminder).toEqual(value);
     expect(registry.getBot('app_default').config.sessionOwnerReminder).toEqual(value);
 
@@ -483,6 +483,97 @@ describe('bot-config store', () => {
       text: '<at user_id="ou_other"></at>',
     })).toEqual({ ok: false, reason: 'invalid_session_owner_reminder' });
     expect(readConfig().sessionOwnerReminder).toEqual(value);
+  });
+
+  it('preserves weekly windows when a legacy client updates the old fields', async () => {
+    const weeklyWindows = {
+      mon: [{ start: '10:30', end: '21:30' }],
+      tue: [], wed: [], thu: [], fri: [], sat: [], sun: [],
+    };
+    const { registry } = await loaded({
+      sessionOwnerReminder: {
+        enabled: true,
+        intervalMinutes: 30,
+        text: '已有配置。',
+        states: ['idle'],
+        weeklyWindows,
+      },
+    });
+    const reminderStore = await import('../src/services/session-owner-reminder-config-store.js');
+    const saved = await reminderStore.updateSessionOwnerReminderConfig('app_default', {
+      enabled: true,
+      intervalMinutes: 45,
+      text: '旧界面更新。',
+      states: ['idle'],
+    });
+
+    expect(saved).toEqual({
+      ok: true,
+      update: {
+        config: {
+          enabled: true,
+          intervalMinutes: 45,
+          text: '旧界面更新。',
+          states: ['idle'],
+          weeklyWindows,
+        },
+        shouldReset: false,
+      },
+    });
+    expect(readConfig().sessionOwnerReminder.weeklyWindows).toEqual(weeklyWindows);
+    expect(registry.getBot('app_default').config.sessionOwnerReminder?.weeklyWindows).toEqual(weeklyWindows);
+  });
+
+  it('validates the final legacy-client merge and rejects explicit invalid windows', async () => {
+    const emptyWeek = { mon: [], tue: [], wed: [], thu: [], fri: [], sat: [], sun: [] };
+    const { registry } = await loaded({
+      sessionOwnerReminder: {
+        enabled: false,
+        intervalMinutes: 30,
+        text: '已有配置。',
+        states: ['idle'],
+        weeklyWindows: emptyWeek,
+      },
+    });
+    const reminderStore = await import('../src/services/session-owner-reminder-config-store.js');
+
+    expect(await reminderStore.updateSessionOwnerReminderConfig('app_default', {
+      enabled: true,
+      intervalMinutes: 30,
+      text: '尝试开启。',
+      states: ['idle'],
+    })).toEqual({ ok: false, reason: 'invalid_session_owner_reminder' });
+    expect(await reminderStore.updateSessionOwnerReminderConfig('app_default', {
+      enabled: false,
+      intervalMinutes: 30,
+      text: '非法周计划。',
+      states: ['idle'],
+      weeklyWindows: null,
+    })).toEqual({ ok: false, reason: 'invalid_session_owner_reminder' });
+    expect(registry.getBot('app_default').config.sessionOwnerReminder?.weeklyWindows).toEqual(emptyWeek);
+  });
+
+  it('calls the runtime reset hook on every true-to-false transition', async () => {
+    const { registry } = await loaded({
+      sessionOwnerReminder: {
+        enabled: true,
+        intervalMinutes: 30,
+        text: '已有配置。',
+        states: ['idle'],
+      },
+    });
+    const reminderStore = await import('../src/services/session-owner-reminder-config-store.js');
+    const reset = vi.fn();
+
+    const saved = await reminderStore.updateSessionOwnerReminderConfig('app_default', {
+      enabled: false,
+      intervalMinutes: 30,
+      text: '关闭。',
+      states: ['idle'],
+    }, reset);
+    expect(saved).toMatchObject({ ok: true, update: { shouldReset: true } });
+    expect(reset).toHaveBeenCalledTimes(1);
+    expect(registry.getBot('app_default').config.sessionOwnerReminder?.enabled).toBe(false);
   });
 
   it('coerceConfigValue(number) accepts positive integers and rejects junk/≤0/fractions', async () => {

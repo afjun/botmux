@@ -2048,7 +2048,16 @@ function configuredCliIds(): Map<string, string> {
   }
 }
 
-function configuredBotAgentFields(): Map<string, { cliId?: string; cliRuntime?: BotConfig['cliRuntime']; cliPathOverride?: string; wrapperCli?: string; model?: string }> {
+type ConfiguredBotAgentFields = {
+  cliId?: string;
+  cliRuntime?: BotConfig['cliRuntime'];
+  cliPathOverride?: string;
+  wrapperCli?: string;
+  model?: string;
+  larkTransportEnabled?: boolean;
+};
+
+function configuredBotAgentFields(): Map<string, ConfiguredBotAgentFields> {
   try {
     return new Map(loadBotConfigs().map(b => [b.larkAppId, {
       cliId: b.cliId,
@@ -2059,16 +2068,17 @@ function configuredBotAgentFields(): Map<string, { cliId?: string; cliRuntime?: 
       cliPathOverride: b.cliRuntime ? undefined : b.cliPathOverride,
       wrapperCli: b.wrapperCli,
       model: b.model,
+      larkTransportEnabled: b.apiOnly !== true,
     }]));
   } catch {
     return new Map();
   }
 }
 
-function withConfiguredCliId<T extends { larkAppId: string; cliId?: string; cliRuntime?: BotConfig['cliRuntime']; cliPathOverride?: string; wrapperCli?: string; model?: string }>(
+function withConfiguredCliId<T extends ConfiguredBotAgentFields & { larkAppId: string }>(
   bot: T,
-  ids: Map<string, string> | Map<string, { cliId?: string; cliRuntime?: BotConfig['cliRuntime']; cliPathOverride?: string; wrapperCli?: string; model?: string }>,
-): T & { cliId?: string; cliRuntime?: BotConfig['cliRuntime']; cliPathOverride?: string; wrapperCli?: string; model?: string } {
+  ids: Map<string, string> | Map<string, ConfiguredBotAgentFields>,
+): T & ConfiguredBotAgentFields {
   const raw = ids.get(bot.larkAppId);
   const fallback = typeof raw === 'string' ? { cliId: raw } : raw;
   return {
@@ -2078,6 +2088,7 @@ function withConfiguredCliId<T extends { larkAppId: string; cliId?: string; cliR
     cliPathOverride: bot.cliPathOverride || fallback?.cliPathOverride,
     wrapperCli: bot.wrapperCli || fallback?.wrapperCli,
     model: bot.model || fallback?.model,
+    larkTransportEnabled: bot.larkTransportEnabled ?? fallback?.larkTransportEnabled,
   };
 }
 

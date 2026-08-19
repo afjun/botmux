@@ -60,14 +60,23 @@ export function hostLocalTimeZone(): string {
  * 每一层都经过 `isValidTimeZone` 校验，非法值直接跳到下一层，保证返回的一定是可用
  * IANA 名（最终兜底 `hostLocalTimeZone()` 里的 `Etc/Unknown → UTC`）。
  */
-export function scheduleTimeZone(): string {
+export interface ResolvedScheduleTimeZone {
+  timeZone: string;
+  source: 'environment' | 'settings' | 'host';
+}
+
+export function resolveScheduleTimeZone(): ResolvedScheduleTimeZone {
   const envTz = process.env.BOTMUX_SCHEDULE_TIMEZONE?.trim();
-  if (envTz && isValidTimeZone(envTz)) return envTz;
+  if (envTz && isValidTimeZone(envTz)) return { timeZone: envTz, source: 'environment' };
 
   const configured = readGlobalConfig().scheduleTimeZone;
-  if (configured && isValidTimeZone(configured)) return configured;
+  if (configured && isValidTimeZone(configured)) return { timeZone: configured, source: 'settings' };
 
-  return hostLocalTimeZone();
+  return { timeZone: hostLocalTimeZone(), source: 'host' };
+}
+
+export function scheduleTimeZone(): string {
+  return resolveScheduleTimeZone().timeZone;
 }
 
 // ─── tz-aware「明天 HH:MM」→ UTC 瞬时 ────────────────────────────────────────

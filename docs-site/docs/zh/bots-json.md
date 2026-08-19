@@ -151,6 +151,41 @@
 | `messageQuota` | 消息额度开关 `{ "defaultLimit": N }`：配了正整数后，不带数字的 `/grant` 套用 N 条额度；不配则授权无限。仅约束 talk 授权，不影响 `canOperate` |
 | `restrictGrantCommands` | `true` 时，仅靠 per-user 授权（`chatGrants` / `globalGrants`）放行的人禁用**所有斜杠命令**，只能普通对话；owner / `allowedUsers` / oncall / 整群成员不受影响。默认 `false` |
 | `autoGrantRequestCards` | 默认开启。显式设为 `false` 时，群里未授权的人或外部 bot @ 本 bot 但被对话权限闸挡住时，不再自动给 owner 发 `/grant` 申请卡，改为静默丢弃 |
+| `sessionOwnerReminder` | 会话 Owner 定时提醒配置；仅飞书话题会话生效。包含开关、间隔、提醒文本、状态和周计划，见下节 |
+
+### 会话 Owner 定时提醒
+
+```json
+{
+  "sessionOwnerReminder": {
+    "enabled": true,
+    "intervalMinutes": 30,
+    "text": "该会话已等待处理，请继续跟进。",
+    "states": ["idle", "dormant", "pending_repo", "tui_prompt", "agent_attention", "limited"],
+    "weeklyWindows": {
+      "mon": [{ "start": "10:30", "end": "21:30" }],
+      "tue": [{ "start": "10:30", "end": "21:30" }],
+      "wed": [{ "start": "10:30", "end": "21:30" }],
+      "thu": [{ "start": "10:30", "end": "21:30" }],
+      "fri": [{ "start": "10:30", "end": "21:30" }],
+      "sat": [],
+      "sun": []
+    }
+  }
+}
+```
+
+- 新配置默认周一至周五 `10:30–21:30`，周末不提醒；每天最多 24 个分钟级时间段。
+- 每段按 `[start, end)` 判断，开始分钟包含、结束分钟不包含。`00:00–24:00` 表示全天；空数组表示当天不提醒。
+- 单段不能跨午夜。把周一 `22:00` 到周二 `02:00` 拆为周一 `22:00–24:00` 和周二 `00:00–02:00`。
+- 重叠、包含和重复范围均合法，运行时取并集；配置保留原输入顺序。
+- 周计划按全局“定时任务时区”解释：`BOTMUX_SCHEDULE_TIMEZONE` → Dashboard 全局设置 → 主机时区。DST 按 IANA 时区真实挂钟处理。
+- 窗口外只抑制发送，等待时间继续累计；进入窗口后若已到期，只补发一条，不追补窗口外错过的轮次。
+- 修改周计划、时区、间隔或文案不会重置等待时间；关闭总开关会清空等待状态，重新开启后从头计时。
+- 有 Owner 时通知 Owner；没有 Owner 时通知最近调用者。仍只对 active、非 queued、thread scope 且有飞书 transport 的 Session 生效。
+- 升级前保存的旧配置如果没有 `weeklyWindows`，继续按周一至周日全天运行，不会静默套用新默认值。旧版本 daemon 会忽略该字段并退化为全天提醒，不要在依赖时间限制时降级。
+
+日常编辑推荐使用 Dashboard「Bot 配置 → 机器人 → 高级 → 会话 Owner 定时提醒」；保存后热生效，无需重启 daemon。手工编辑 `bots.json` 仍需按本文末尾说明重启。
 
 ## 文件沙盒
 

@@ -838,10 +838,18 @@ export async function withFileLock<T>(
         throw writeErr;
       }
       try {
-        return await fn();
-      } finally {
-        try { if (owned) await releaseOwnedLock(lockPath, owned); } catch { /* tolerate */ }
+        const result = await fn();
+        // Close our private descriptor before unlinking the public lock name.
+        // Callers may perform in-memory side effects immediately before fn returns;
+        // keeping the lock published until close completes preserves that ordering.
         try { await fh.close(); } catch { /* tolerate */ }
+        fh = undefined;
+        try { if (owned) await releaseOwnedLock(lockPath, owned); } catch { /* tolerate */ }
+        owned = undefined;
+        return result;
+      } finally {
+        try { await fh?.close(); } catch { /* tolerate */ }
+        try { if (owned) await releaseOwnedLock(lockPath, owned); } catch { /* tolerate */ }
       }
     }
 

@@ -1,5 +1,9 @@
 import { store } from './store.js';
 import type { CliRuntimeConfig as SharedCliRuntimeConfig } from '../../adapters/cli/runtime.js';
+import type {
+  SessionOwnerReminderCapability,
+  SessionOwnerReminderConfig,
+} from '../../core/session-owner-reminder-config.js';
 
 export type CliOption = {
   id: string;
@@ -90,12 +94,9 @@ export type BotDefaultsRow = {
   logicalSessionCount?: number;
   residentSessionCount?: number;
   dormantSessionCount?: number;
-  sessionOwnerReminder?: {
-    enabled: boolean;
-    intervalMinutes: number;
-    text: string;
-    states: Array<'idle' | 'dormant' | 'pending_repo' | 'tui_prompt' | 'agent_attention' | 'limited'>;
-  } | null;
+  sessionOwnerReminder?: SessionOwnerReminderConfig | null;
+  sessionOwnerReminderCapability?: SessionOwnerReminderCapability | null;
+  larkTransportEnabled?: boolean;
   startupCommands?: string;
   customPassthroughCommands?: string;
   canTalkDaemonCommands?: string;
