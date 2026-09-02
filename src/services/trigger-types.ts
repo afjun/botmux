@@ -39,6 +39,8 @@ export interface TriggerRequest {
    * localized default topic seed; null suppresses the seed entirely. */
   presentation?: {
     topicMessage?: string | null;
+    /** Delivered before accepting this turn; uuid is a Feishu dedupe key. */
+    ownerNotification?: { text: string; uuid: string };
   };
   options?: {
     dryRun?: boolean;
@@ -191,6 +193,14 @@ export function validateTriggerRequest(raw: unknown): { ok: true; request: Trigg
     }
     if (typeof topicMessage === 'string' && (!topicMessage.trim() || Array.from(topicMessage.trim()).length > 200)) {
       return { ok: false, status: 400, body: { ok: false, errorCode: 'bad_request', error: 'presentation.topicMessage must contain 1 to 200 characters' } };
+    }
+    const ownerNotification = raw.presentation.ownerNotification;
+    if (ownerNotification !== undefined) {
+      if (!isRecord(ownerNotification) || typeof ownerNotification.text !== 'string' || typeof ownerNotification.uuid !== 'string'
+        || !ownerNotification.text.trim() || Array.from(ownerNotification.text.trim()).length > 200
+        || !ownerNotification.uuid.trim() || ownerNotification.uuid.length > 50) {
+        return { ok: false, status: 400, body: { ok: false, errorCode: 'bad_request', error: 'presentation.ownerNotification must contain text (1..200) and uuid (1..50)' } };
+      }
     }
   }
   if (waitForFinalOutput && target.kind !== 'turn') {

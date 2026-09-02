@@ -27,6 +27,17 @@ include an app-scoped open ID, display name, and email when the chat platform
 makes them available. Missing optional fields never block message delivery.
 _Avoid_: session owner, card recipient
 
+**Webhook Owner**:
+A resolved person supplied by a trusted webhook event as a responsible party
+for its triggering workflow node. Every resolved Webhook Owner, up to twenty
+in Meego order, is notified for every accepted event delivery.
+_Avoid_: sender identity, session owner
+
+**Owner Notification**:
+The visible in-context notification attached to an accepted webhook event. It
+appears as a new topic's first message or within that event's existing Session.
+_Avoid_: external alert, session summary
+
 **Token Usage**:
 Token counts reported by an **Agent CLI** or its persisted transcript for a
 **Session**. Token In is the Agent CLI's native input-side total, including

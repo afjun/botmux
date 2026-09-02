@@ -451,6 +451,14 @@ export async function getUserProfileStrict(
     const u = res?.code === 0 ? res?.data?.user : null;
     if (u?.name) {
       out = { status: 'ok', profile: { name: String(u.name), avatarUrl: u.avatar?.avatar_72 ?? u.avatar?.avatar_240 ?? undefined } };
+    } else if (u?.open_id || u?.union_id) {
+      // Some valid tenant-token responses intentionally omit profile fields
+      // (for example, a contact scope without name visibility) while still
+      // returning the canonical user id.  That is sufficient to prove a
+      // direct Open ID belongs to this application, which is all connector
+      // template rendering needs before emitting a native @ mention.  Keep a
+      // stable fallback name for legacy callers that expect a profile object.
+      out = { status: 'ok', profile: { name: String(u.open_id ?? u.union_id), avatarUrl: undefined } };
     } else {
       const miss = res?.code === 0 ? 'not_visible' : classifyContactErrorCode(res?.code);
       if (miss) out = { status: miss };

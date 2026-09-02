@@ -5,10 +5,12 @@ import type { DaemonSession } from '../src/core/types.js';
 const mockGetMessageChatId = vi.fn();
 const mockGetChatMode = vi.fn(async () => 'topic');
 const mockSendMessage = vi.fn(async () => 'om_new_topic');
+const mockReplyMessage = vi.fn(async () => 'om_notification_reply');
 vi.mock('../src/im/lark/client.js', () => ({
   getMessageChatId: (...args: any[]) => mockGetMessageChatId(...args),
   getChatMode: (...args: any[]) => mockGetChatMode(...args),
   sendMessage: (...args: any[]) => mockSendMessage(...args),
+  replyMessage: (...args: any[]) => mockReplyMessage(...args),
   listChatBotMembers: vi.fn(async () => []),
 }));
 
@@ -212,6 +214,54 @@ describe('triggerSessionTurn rootMessageId target', () => {
     expect(mockSendMessage).toHaveBeenCalledWith(APP, CHAT, 'CI 构建失败，请检查发布流水线');
     expect(mockCreateSession).toHaveBeenCalledWith(CHAT, 'om_new_topic', '[External] alerts', 'group');
     expect(activeSessions.get(sessionKey('om_new_topic', APP))?.scope).toBe('thread');
+  });
+
+  it('uses the delivery-critical owner notice as a new topic anchor', async () => {
+    const req = request({ rootMessageId: undefined });
+    req.presentation = {
+      topicMessage: 'ignored because the owner notice anchors the topic',
+      ownerNotification: { text: '需求开发已启动：<at user_id="ou_owner"></at>', uuid: 'meego-owner-abc' },
+    };
+    const activeSessions = new Map<string, DaemonSession>();
+
+    await triggerSessionTurn(req, { larkAppId: APP, activeSessions });
+
+    expect(mockSendMessage).toHaveBeenCalledWith(
+      APP,
+      CHAT,
+      JSON.stringify({ zh_cn: { content: [[
+        { tag: 'text', text: '需求开发已启动：' },
+        { tag: 'at', user_id: 'ou_owner' },
+      ]] } }),
+      'post',
+      'meego-owner-abc',
+    );
+    expect(mockCreateSession).toHaveBeenCalledWith(CHAT, 'om_new_topic', '[External] alerts', 'group');
+  });
+
+  it('replies with the owner notice before delivering to an existing thread', async () => {
+    const send = vi.fn();
+    const ds = existingDs({ worker: { killed: false, send } as any });
+    const activeSessions = new Map<string, DaemonSession>([[sessionKey(ROOT, APP), ds]]);
+    const req = request();
+    req.presentation = { ownerNotification: { text: '需求开发已启动', uuid: 'meego-owner-retry' } };
+
+    await triggerSessionTurn(req, { larkAppId: APP, activeSessions });
+
+    expect(mockReplyMessage).toHaveBeenCalledWith(APP, ROOT, '需求开发已启动', 'text', true, 'meego-owner-retry');
+    expect(mockReplyMessage.mock.invocationCallOrder[0]).toBeLessThan(send.mock.invocationCallOrder[0]!);
+  });
+
+  it('does not dispatch an existing session when its owner notification fails', async () => {
+    const send = vi.fn();
+    const ds = existingDs({ worker: { killed: false, send } as any });
+    const activeSessions = new Map<string, DaemonSession>([[sessionKey(ROOT, APP), ds]]);
+    const req = request();
+    req.presentation = { ownerNotification: { text: '需求开发已启动', uuid: 'meego-owner-failure' } };
+    mockReplyMessage.mockRejectedValueOnce(new Error('lark unavailable'));
+
+    await expect(triggerSessionTurn(req, { larkAppId: APP, activeSessions })).rejects.toThrow('lark unavailable');
+    expect(send).not.toHaveBeenCalled();
   });
 
   it('suppresses the topic seed and keeps a topicless automation session chat-scoped', async () => {
