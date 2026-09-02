@@ -70,6 +70,45 @@ export function buildExternalEventTopicMessage(req: TriggerRequest, larkAppId?: 
   );
 }
 
+async function deliverOwnerNotification(
+  notification: NonNullable<TriggerRequest['presentation']>['ownerNotification'],
+  larkAppId: string,
+  chatId: string,
+  scope: 'thread' | 'chat',
+  anchor: string,
+): Promise<string> {
+  if (!notification) return anchor;
+  const message = ownerNotificationMessage(notification.text);
+  // Do not catch: this notification is delivery-critical. The webhook must be
+  // retried if Lark does not accept it, and uuid makes that retry idempotent.
+  if (scope === 'thread') {
+    return replyMessage(larkAppId, anchor, message.content, message.msgType, true, notification.uuid);
+  }
+  return sendMessage(larkAppId, chatId, message.content, message.msgType, notification.uuid);
+}
+
+/**
+ * Feishu silently removes native <at> tags from ordinary text messages in
+ * some group/topic clients.  Post messages carry mentions structurally, so
+ * use that transport only when the trusted connector renderer produced one.
+ */
+function ownerNotificationMessage(text: string): { content: string; msgType: 'text' | 'post' } {
+  const tag = /<at user_id="(ou_[A-Za-z0-9_-]+)"><\/at>/g;
+  const elements: Array<Record<string, string>> = [];
+  let cursor = 0;
+  for (const match of text.matchAll(tag)) {
+    const index = match.index ?? 0;
+    const before = text.slice(cursor, index);
+    if (before) elements.push({ tag: 'text', text: before });
+    elements.push({ tag: 'at', user_id: match[1] });
+    cursor = index + match[0].length;
+  }
+  if (elements.length === 0) return { content: text, msgType: 'text' };
+  const rest = text.slice(cursor);
+  if (rest) elements.push({ tag: 'text', text: rest });
+  return { content: JSON.stringify({ zh_cn: { content: [elements] } }), msgType: 'post' };
+}
+
 /** Connector-owner directives are trusted application context. Keep them
  * separate from the full legacy wrapper, which also contains untrusted event
  * bytes and therefore must never be promoted wholesale to developer context. */
@@ -379,6 +418,7 @@ export async function triggerSessionTurn(
   const dryRun = !!req.options?.dryRun;
   const prompt = buildUntrustedEventPrompt(req, triggerId);
   const topicMessage = buildExternalEventTopicMessage(req, larkAppId);
+  const ownerNotification = req.presentation?.ownerNotification;
   const codexAppText = buildExternalEventVisibleText(req, larkAppId);
   const codexAppApplicationContext = buildExternalEventApplicationContext(req);
   const codexAppMessageContext = buildExternalEventDataContext(req, triggerId);
@@ -425,7 +465,7 @@ export async function triggerSessionTurn(
   // it always routes to that thread anchor after daemon-side chat ownership check.
   const regularGroupMode: ChatReplyMode = httpVirtual ? 'chat' : resolveRegularGroupMode(larkAppId, chatId);
   if (!ds && !req.target.sessionId && !rootMessageId && !httpVirtual
-      && (regularGroupMode !== 'new-topic' || topicMessage === null)) {
+      && (regularGroupMode !== 'new-topic' || (topicMessage === null && !ownerNotification))) {
     ds = deps.activeSessions.get(sessionKey(chatId, larkAppId));
   }
 
@@ -438,6 +478,18 @@ export async function triggerSessionTurn(
       message: ds ? 'would inject into existing session' : 'would create or deliver a new session turn',
       promptPreview,
     };
+  }
+
+  // Existing sessions do not open a topic seed, so the configured owner
+  // notification is explicitly delivered for every accepted webhook first.
+  if (ds && ownerNotification) {
+    await deliverOwnerNotification(
+      ownerNotification,
+      larkAppId,
+      chatId,
+      ds.scope,
+      ds.session.rootMessageId || chatId,
+    );
   }
 
   if (ds?.worker && !ds.worker.killed) {
@@ -586,16 +638,23 @@ export async function triggerSessionTurn(
   const shouldOpenOwnTopic = !rootMessageId
     && !httpVirtual
     && externalEventOpensOwnTopic(chatMode, regularGroupMode);
-  if (shouldOpenOwnTopic && topicMessage !== null) {
-    anchor = await sendMessage(larkAppId, chatId, topicMessage);
+  if (shouldOpenOwnTopic && (topicMessage !== null || ownerNotification)) {
+    // The notification is the root message when a new topic is opened, so it
+    // remains the durable thread anchor for all later replies.
+    const ownerMessage = ownerNotification ? ownerNotificationMessage(ownerNotification.text) : undefined;
+    anchor = ownerNotification
+      ? await sendMessage(larkAppId, chatId, ownerMessage!.content, ownerMessage!.msgType, ownerNotification.uuid)
+      : await sendMessage(larkAppId, chatId, topicMessage!);
     scope = 'thread';
+  } else if (ownerNotification) {
+    await deliverOwnerNotification(ownerNotification, larkAppId, chatId, scope, anchor);
   }
 
   const session = sessionStore.createSession(chatId, anchor, triggerTitle(req), 'group');
   const now = Date.now();
   session.larkAppId = larkAppId;
   session.scope = scope;
-  if (shouldOpenOwnTopic && topicMessage === null) session.externalTriggerTopicless = true;
+  if (shouldOpenOwnTopic && topicMessage === null && !ownerNotification) session.externalTriggerTopicless = true;
   session.lastMessageAt = new Date(now).toISOString();
   session.workingDir = wd.workingDir;
   session.cliId = bot.config.cliId;

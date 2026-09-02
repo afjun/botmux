@@ -106,6 +106,16 @@ describe('getUserProfileStrict', () => {
     expect(await getUserProfileStrict(APP, id)).toEqual({ status: 'not_visible' });
   });
 
+  it('accepts a canonical user id when limited contact visibility omits the name', async () => {
+    const id = freshId();
+    requestMock.mockResolvedValue({ code: 0, data: { user: { open_id: id } } });
+
+    expect(await getUserProfileStrict(APP, id)).toEqual({
+      status: 'ok',
+      profile: { name: id, avatarUrl: undefined },
+    });
+  });
+
   it('legacy getUserProfile keeps its profile-or-null contract over all strict states', async () => {
     const ok = freshId();
     requestMock.mockResolvedValueOnce({ code: 0, data: { user: { name: 'C' } } });

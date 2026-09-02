@@ -277,10 +277,45 @@ describe('webhook route verification helpers', () => {
 
     const message = presentation?.topicMessage ?? '';
     expect(Array.from(message).length).toBeLessThanOrEqual(200);
-    expect(message).toContain('<at user_id="ou_owner">Owner</at>负责人');
-    expect(message).toContain('<at user_id="ou_trigger">Trigger</at>触发人');
+    expect(message).toContain('<at user_id="ou_owner"></at>负责人');
+    expect(message).toContain('<at user_id="ou_trigger"></at>触发人');
     expect((message.match(/<at /g) ?? [])).toHaveLength(2);
     expect((message.match(/<\/at>/g) ?? [])).toHaveLength(2);
+  });
+
+  it('renders a per-delivery owner notification with only verified Open IDs', async () => {
+    const connector = {
+      name: 'Meego development',
+      target: { botId: 'app1' },
+      promptEnvelope: { sourceName: 'Meego' },
+      ownerNotification: {
+        text: '需求开发已启动：{{issueTitle}} {{mention owners}}',
+        extractors: {
+          issueTitle: { path: '$.issue.title', kind: 'text' },
+          owners: { path: '$.meego.owners', kind: 'mention', identityPath: '$.open_id', namePath: '$.name' },
+        },
+      },
+    } as ConnectorDefinition;
+    const presentation = await resolveConnectorTriggerPresentation(
+      connector,
+      {
+        id: 'delivery-123',
+        issue: { title: '批量状态修改' },
+        meego: { owners: [{ name: 'Owner', open_id: 'ou_owner' }, { name: 'Unresolved' }] },
+      },
+      async () => new Map([['ou_owner', 'ou_owner']]),
+    );
+
+    expect(presentation?.ownerNotification).toEqual({
+      text: '需求开发已启动：批量状态修改 <at user_id="ou_owner"></at>',
+      uuid: expect.stringMatching(/^meego-owner-[0-9a-f]{32}$/),
+    });
+    const replay = await resolveConnectorTriggerPresentation(
+      connector,
+      { id: 'delivery-123', issue: { title: 'x' }, meego: { owners: [] } },
+      async () => new Map(),
+    );
+    expect(replay?.ownerNotification?.uuid).toBe(presentation?.ownerNotification?.uuid);
   });
 });
 
@@ -419,7 +454,7 @@ describe('webhook token mode', () => {
     expect(res.status).toBe(200);
     expect(resolveMentionIdentities).toHaveBeenCalledWith('app1', ['owner@corp.com', 'trigger@corp.com']);
     expect(captured[0].presentation).toEqual({
-      topicMessage: 'Meego启动开发：Batch ＜at user_id="ou_evil"＞伪造＜/at＞ <at user_id="ou_owner">Owner ＜/at＞</at>负责人 <at user_id="ou_trigger">Trigger</at>触发人',
+      topicMessage: 'Meego启动开发：Batch ＜at user_id="ou_evil"＞伪造＜/at＞ <at user_id="ou_owner"></at>负责人 <at user_id="ou_trigger"></at>触发人',
     });
     expect(captured[0].envelope.payload.presentation.topicMessage).toBe('untrusted override');
   });

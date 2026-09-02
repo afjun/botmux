@@ -1,4 +1,4 @@
-import type { ConnectorDefinition, ConnectorTopicMessageExtractor } from './connector-store.js';
+import type { ConnectorDefinition, ConnectorMessageTemplate, ConnectorTopicMessageExtractor } from './connector-store.js';
 import { getJsonPathValue } from './webhook-lifecycle-extractors.js';
 
 const TEMPLATE_TOKEN = /{{\s*(?:(mention)\s+)?([A-Za-z][A-Za-z0-9_.-]{0,63})\s*}}/g;
@@ -80,7 +80,10 @@ function renderMention(chunk: MentionRenderChunk): string {
   if (!name) return '';
   const separator = chunk.separator ?? '';
   if (chunk.openId) {
-    return `${separator}<at user_id="${chunk.openId}">${name}</at>`;
+    // Lark text messages resolve the display name from `user_id`; embedding
+    // text inside the tag makes some clients render an empty mention.  Keep
+    // the canonical empty-body form used by Botmux's other text send paths.
+    return `${separator}<at user_id="${chunk.openId}"></at>`;
   }
   return `${separator}${name}`;
 }
@@ -154,6 +157,25 @@ export async function renderConnectorTopicTemplate(
 ): Promise<string | undefined> {
   const topicMessage = connector.topicMessage;
   if (topicMessage?.mode !== 'template' || !topicMessage.text || !topicMessage.extractors) return undefined;
+  return renderConnectorMessageTemplate(
+    connector,
+    { text: topicMessage.text, extractors: topicMessage.extractors },
+    payload,
+    resolveIdentities,
+  );
+}
+
+/** Render a trusted connector message while treating all extracted webhook
+ * fields as untrusted text. Direct Open IDs are profile-verified before a
+ * native Lark mention is produced. */
+export async function renderConnectorMessageTemplate(
+  connector: ConnectorDefinition,
+  template: ConnectorMessageTemplate,
+  payload: unknown,
+  resolveIdentities: ResolveConnectorMentionIdentities,
+  options: { omitUnresolvedMentions?: boolean } = {},
+): Promise<string | undefined> {
+  const topicMessage = template;
 
   const mentionValues = new Map<string, MentionCandidate[]>();
   const identities: string[] = [];
@@ -217,18 +239,20 @@ export async function renderConnectorTopicTemplate(
       previousTokenWasMention = false;
       continue;
     }
-    const renderedMentions = (mentionValues.get(alias) ?? []).map<MentionRenderChunk>(candidate => {
+    const renderedMentions = (mentionValues.get(alias) ?? []).flatMap<MentionRenderChunk>(candidate => {
       const openId = resolved.get(candidate.identity);
+      const validOpenId = !!openId
+        && codepointLength(openId) <= MAX_OPEN_ID_CODEPOINTS
+        && VALID_OPEN_ID.test(openId);
+      if (options.omitUnresolvedMentions && !validOpenId) return [];
       const name = escapeConnectorTopicText(candidate.name);
-      return {
+      return [{
         kind: 'mention',
         name,
-        ...(openId
-          && codepointLength(openId) <= MAX_OPEN_ID_CODEPOINTS
-          && VALID_OPEN_ID.test(openId)
+        ...(validOpenId
           ? { openId }
           : {}),
-      };
+      }];
     });
     renderedMentions.forEach((value, position) => chunks.push({
       ...value,

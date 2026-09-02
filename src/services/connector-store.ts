@@ -19,6 +19,12 @@ export interface ConnectorTopicMessageExtractor {
   namePath?: string;
 }
 
+/** A connector-owned, data-safe message template. */
+export interface ConnectorMessageTemplate {
+  text: string;
+  extractors: Record<string, ConnectorTopicMessageExtractor>;
+}
+
 export interface ConnectorDefinition {
   id: string;
   name: string;
@@ -61,6 +67,8 @@ export interface ConnectorDefinition {
      *  `{{alias}}` or `{{mention alias}}` tokens in `text`. */
     extractors?: Record<string, ConnectorTopicMessageExtractor>;
   };
+  /** Optional notification sent for every accepted webhook. */
+  ownerNotification?: ConnectorMessageTemplate;
   /** When true, the daemon drops the trailing final_output reply for turns this
    *  webhook fires (the live streaming card / start notice still show). Lets a
    *  webhook that only needs the bot's in-topic `botmux send` output avoid the

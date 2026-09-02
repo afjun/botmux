@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { getConnector, listConnectors, type ConnectorDefinition } from '../services/connector-store.js';
 import { getWebhookSecret } from '../services/webhook-key.js';
 import type { TriggerRequest, TriggerResponse } from '../services/trigger-types.js';
@@ -12,6 +12,7 @@ import {
 import { extractDedupKey } from '../services/webhook-lifecycle-extractors.js';
 import {
   renderConnectorTopicTemplate,
+  renderConnectorMessageTemplate,
   type ResolveConnectorMentionIdentities,
 } from '../services/connector-topic-template.js';
 import {
@@ -207,6 +208,17 @@ export async function resolveConnectorMentionIdentities(
 }
 
 async function defaultResolveMentionIdentities(botId: string, identities: string[]): Promise<Map<string, string>> {
+  // Webhooks are handled by the Dashboard process, which does not otherwise
+  // need to instantiate a bot client.  Register the connector target lazily
+  // before resolving mention identities; without this, getBotClient throws
+  // and the best-effort template renderer silently drops every @ mention.
+  const { getBot, loadBotConfigs, registerBot } = await import('../bot-registry.js');
+  try {
+    getBot(botId);
+  } catch {
+    const cfg = loadBotConfigs().find(candidate => candidate.larkAppId === botId);
+    if (cfg) registerBot(cfg);
+  }
   const { getUserProfileStrict, resolveAllowedUsersWithMap } = await import('../im/lark/client.js');
   return resolveConnectorMentionIdentities(botId, identities, {
     resolveRaw: resolveAllowedUsersWithMap,
@@ -222,9 +234,27 @@ export async function resolveConnectorTriggerPresentation(
   payload: unknown,
   resolveMentions: ResolveConnectorMentionIdentities = defaultResolveMentionIdentities,
 ): Promise<TriggerRequest['presentation'] | undefined> {
-  if (connector.topicMessage?.mode !== 'template') return connectorTriggerPresentation(connector);
-  const topicMessage = await renderConnectorTopicTemplate(connector, payload, resolveMentions);
-  return topicMessage ? { topicMessage } : undefined;
+  const base = connector.topicMessage?.mode === 'template'
+    ? await renderConnectorTopicTemplate(connector, payload, resolveMentions)
+    : connectorTriggerPresentation(connector)?.topicMessage;
+  const notification = connector.ownerNotification
+    ? await renderConnectorMessageTemplate(
+      connector, connector.ownerNotification, payload, resolveMentions, { omitUnresolvedMentions: true },
+    )
+    : undefined;
+  const deliveryId = payload && typeof payload === 'object' && !Array.isArray(payload)
+    ? (payload as Record<string, unknown>).id
+    : undefined;
+  // Feishu uuids are capped at 50 characters. Hashing preserves deterministic
+  // retry de-duplication without trusting a caller-provided uuid verbatim.
+  const uuid = typeof deliveryId === 'string' || typeof deliveryId === 'number'
+    ? `meego-owner-${createHash('sha256').update(String(deliveryId)).digest('hex').slice(0, 32)}`
+    : undefined;
+  const presentation: NonNullable<TriggerRequest['presentation']> = {
+    ...(base !== undefined ? { topicMessage: base } : {}),
+    ...(notification && uuid ? { ownerNotification: { text: notification, uuid } } : {}),
+  };
+  return Object.keys(presentation).length > 0 ? presentation : undefined;
 }
 
 function dynamicChatId(req: IncomingMessage, url: URL, payload: unknown): string | undefined {

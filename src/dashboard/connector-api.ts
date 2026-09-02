@@ -180,6 +180,24 @@ function normalizeTopicMessage(
   return { ok: true, value: { mode: 'template', text, extractors } };
 }
 
+function normalizeOwnerNotification(
+  value: unknown,
+  prior: ConnectorDefinition['ownerNotification'] | undefined,
+): { ok: true; value?: ConnectorDefinition['ownerNotification'] } | { ok: false; error: string } {
+  if (value === null) return { ok: true, value: undefined };
+  if (value === undefined && !prior) return { ok: true, value: undefined };
+  const raw = record(value ?? prior);
+  const topic = normalizeTopicMessage(
+    { ...raw, mode: 'template' },
+    prior ? { mode: 'template', ...prior } : undefined,
+  );
+  if (!topic.ok) return { ok: false, error: topic.error.replace('topic_message', 'owner_notification') };
+  if (topic.value.mode !== 'template' || !topic.value.text || !topic.value.extractors) {
+    return { ok: false, error: 'owner_notification_template_required' };
+  }
+  return { ok: true, value: { text: topic.value.text, extractors: topic.value.extractors } };
+}
+
 function sameStringSet(left: string[] | undefined, right: string[] | undefined): boolean {
   return JSON.stringify([...new Set(left ?? [])].sort())
     === JSON.stringify([...new Set(right ?? [])].sort());
@@ -252,6 +270,8 @@ function normalizeConnectorInput(
       : prior?.verify.type ?? 'token';
   const topicMessage = normalizeTopicMessage(c.topicMessage, prior?.topicMessage);
   if (!topicMessage.ok) return topicMessage;
+  const ownerNotification = normalizeOwnerNotification(c.ownerNotification, prior?.ownerNotification);
+  if (!ownerNotification.ok) return ownerNotification;
 
   const now = new Date().toISOString();
   const next: ConnectorDefinition = {
@@ -299,6 +319,7 @@ function normalizeConnectorInput(
         : prior?.promptEnvelope.instruction ? { instruction: prior.promptEnvelope.instruction } : {}),
     },
     topicMessage: topicMessage.value,
+    ...(ownerNotification.value ? { ownerNotification: ownerNotification.value } : {}),
     ...(bool(c.suppressFinalOutput, prior?.suppressFinalOutput ?? false) ? { suppressFinalOutput: true } : {}),
     loggingPolicy: {
       storePayload: bool(loggingPolicy.storePayload, prior?.loggingPolicy.storePayload ?? true),

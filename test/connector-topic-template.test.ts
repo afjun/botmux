@@ -82,9 +82,9 @@ describe('connector trusted topic template', () => {
     );
 
     expect(Array.from(message ?? '')).toHaveLength(200);
-    expect(message).toContain('<at user_id="ou_owner">');
+    expect(message).toContain('<at user_id="ou_owner"></at>');
     expect(message).toContain('</at>负责人');
-    expect(message).toContain('<at user_id="ou_trigger">');
+    expect(message).toContain('<at user_id="ou_trigger"></at>');
     expect(message).toContain('</at>触发人');
     expect((message?.match(/<at /g) ?? [])).toHaveLength(2);
     expect((message?.match(/<\/at>/g) ?? [])).toHaveLength(2);
@@ -105,7 +105,7 @@ describe('connector trusted topic template', () => {
     );
 
     expect(Array.from(message ?? '').length).toBeLessThanOrEqual(200);
-    expect(message).toContain('<at user_id="ou_owner">owner@corp.com</at>负责人');
+    expect(message).toContain('<at user_id="ou_owner"></at>负责人');
   });
 
   it.each([4, 20])(
@@ -134,12 +134,11 @@ describe('connector trusted topic template', () => {
         async () => resolved,
       );
 
-      expect(Array.from(message ?? '')).toHaveLength(191);
-      expect(message).toBe(
-        `${owners.slice(0, 3).map(owner => (
-          `<at user_id="${resolved.get(owner.email)}">${owner.name}</at>`
-        )).join(' ')}负责人`,
-      );
+      const expected = `${owners.slice(0, 3).map(owner => (
+        `<at user_id="${resolved.get(owner.email)}"></at>`
+      )).join(' ')}负责人`;
+      expect(Array.from(message ?? '')).toHaveLength(Array.from(expected).length);
+      expect(message).toBe(expected);
       expect((message?.match(/<at /g) ?? [])).toHaveLength(3);
       expect(message).not.toContain('Owner 4');
     },
