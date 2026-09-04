@@ -43,7 +43,7 @@ Webhook Connector 需要声明 owner 提取规则，例如 Meego payload：
 ```json
 {
   "credentialOwner": {
-    "path": "meego.owners",
+    "path": "$.meego.owners",
     "openIdPath": "open_id",
     "emailPath": "email"
   }
