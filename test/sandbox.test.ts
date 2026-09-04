@@ -143,6 +143,53 @@ describe('prepareDirectSandbox canonicalizes the exec bin (symlinked-$HOME)', ()
   });
 });
 
+describe('prepareDirectSandbox credential bootstrap wrapper', () => {
+  it('runs bootstrap inside bwrap before the original CLI argv', () => {
+    if (process.platform !== 'linux') return;
+    const dir = tmp();
+    const r = prepareDirectSandbox({
+      sessionId: 'credential-bootstrap', dataDir: tmp(),
+      policy: { rules: [], net: true, writeRegexes: [] },
+      chdir: dir, home: dir, cliBin: '/usr/bin/true', cliArgs: ['--version'],
+      credentialBootstraps: [{
+        id: 'demo',
+        command: '/usr/bin/true',
+        args: [],
+        successPaths: ['/tmp/demo-ready'],
+        timeoutSeconds: 30,
+        lockPath: '/tmp/demo.lock',
+      }],
+    });
+    if (!r) return;
+    const dashDash = r.args.lastIndexOf('--');
+    expect(r.args[dashDash + 1]).toBe(realpathSync(process.execPath));
+    expect(r.args[dashDash + 2]).toContain('credential-bootstrap-runner.js');
+    expect(r.args[dashDash + 4]).toBe('/usr/bin/true');
+    expect(r.args[dashDash + 5]).toBe('--version');
+    r.cleanup();
+  });
+
+  it('publishes a devflow-cli shim that bypasses its host wrapper inside bwrap', () => {
+    if (process.platform !== 'linux') return;
+    const dataDir = tmp();
+    const dir = tmp();
+    const r = prepareDirectSandbox({
+      sessionId: 'devflow-bootstrap', dataDir,
+      policy: { rules: [], net: true, writeRegexes: [] },
+      chdir: dir, home: dir, cliBin: '/usr/bin/true', cliArgs: [],
+      credentialBootstraps: [{
+        id: 'devflow-auth', command: '/usr/bin/true', args: ['auth', 'update'],
+        successPaths: [join(dir, 'cloud_jwt_token.txt')], timeoutSeconds: 30,
+        lockPath: join(dir, 'devflow.lock'),
+      }],
+    });
+    if (!r) return;
+    const shim = join(dataDir, 'sandboxes', 'devflow-bootstrap', 'shimbin', 'devflow-cli');
+    expect(readFileSync(shim, 'utf8')).toContain('exec "/usr/bin/true" "$@"');
+    r.cleanup();
+  });
+});
+
 
 // ── validateRelayRequest: pure schema + flag-allowlist boundary (UNCHANGED) ──
 // Regression for the "sandbox makes host read an arbitrary path" confused-deputy

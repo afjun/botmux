@@ -85,6 +85,9 @@ export function canonicalScheduleInput(t: {
   executionPosition?: ScheduleExecutionPosition;
   topicTitle?: string;
   larkAppId?: string;
+  credentialPrincipal?: ScheduledTask['credentialPrincipal'];
+  credentialIsolation?: ScheduledTask['credentialIsolation'];
+  sandbox?: boolean;
   repeat?: { times: number | null; completed?: number };
   deliver?: 'origin' | 'local' | 'new-topic';
   silent?: boolean;
@@ -114,6 +117,12 @@ export function canonicalScheduleInput(t: {
     executionPosition: t.executionPosition,
     topicTitle: t.topicTitle,
     larkAppId: t.larkAppId,
+    // These fields determine which host credentials a future execution can
+    // see. Treat them as immutable task input so an idempotent retry cannot
+    // silently reuse a task captured for another owner or sandbox policy.
+    credentialPrincipal: t.credentialPrincipal,
+    credentialIsolation: t.credentialIsolation,
+    sandbox: t.sandbox === true ? true : undefined,
     // Strip `completed` — it mutates after the task starts running, but
     // `times` is the durable user intent.
     repeat: t.repeat ? { times: t.repeat.times } : undefined,
@@ -258,6 +267,9 @@ function migrate(raw: any): ScheduledTask | null {
     creatorChatId: raw.creatorChatId,
     creatorRootMessageId: raw.creatorRootMessageId,
     creatorLarkAppId: raw.creatorLarkAppId,
+    credentialPrincipal: raw.credentialPrincipal,
+    credentialIsolation: raw.credentialIsolation,
+    sandbox: raw.sandbox === true ? true : undefined,
     enabled: raw.enabled !== false,
     createdAt: raw.createdAt,
     lastRunAt: raw.lastRunAt,
@@ -470,6 +482,9 @@ export function createTask(params: {
   creatorChatId?: string;
   creatorRootMessageId?: string;
   creatorLarkAppId?: string;
+  credentialPrincipal?: ScheduledTask['credentialPrincipal'];
+  credentialIsolation?: ScheduledTask['credentialIsolation'];
+  sandbox?: boolean;
   nextRunAt?: string;
   repeat?: { times: number | null; completed: number };
   deliver?: 'origin' | 'local' | 'new-topic';
@@ -523,6 +538,9 @@ export function createTask(params: {
       creatorChatId: params.creatorChatId,
       creatorRootMessageId: params.creatorRootMessageId,
       creatorLarkAppId: params.creatorLarkAppId,
+      credentialPrincipal: params.credentialPrincipal,
+      credentialIsolation: params.credentialIsolation,
+      sandbox: params.sandbox,
       enabled: true,
       createdAt: new Date().toISOString(),
       nextRunAt: params.nextRunAt,

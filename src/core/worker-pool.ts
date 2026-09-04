@@ -3816,6 +3816,12 @@ export async function forkSession(
     childTitle,
     targetChatType,
     targetScope,
+    {
+      credentialPrincipal: ds.session.credentialPrincipal,
+      credentialIsolation: ds.session.credentialIsolation,
+      sandbox: ds.session.sandbox,
+      larkAppId: ds.larkAppId,
+    },
   );
   // Provenance + fork wiring. cliSessionId points at the SOURCE's CLI id: the
   // child's first spawn resumes it and forks forward (pendingForkSession), then
@@ -4374,7 +4380,7 @@ export function forkWorker(
     initAttributionTurnId,
   );
   const runtimeIdentity = runtimeBuildIdentity();
-  const initMsg: DaemonToWorker = {
+  const initMsg: Extract<DaemonToWorker, { type: 'init' }> = {
     type: 'init',
     sessionId: ds.session.sessionId,
     chatId: ds.chatId,
@@ -4450,6 +4456,8 @@ export function forkWorker(
     forkSession: ds.session.pendingForkSession === true,
     cliSessionId: ds.session.cliSessionId,
     ownerOpenId: ds.ownerOpenId,
+    credentialPrincipal: ds.session.credentialPrincipal,
+    credentialIsolation: ds.session.credentialIsolation,
     webPort: ds.session.webPort,
     larkAppId: botCfg.larkAppId,
     // Freeze on the session transport capability: a no-transport session
@@ -5607,6 +5615,16 @@ function setupWorkerHandlers(
         break;
       }
 
+      case 'credential_bootstrap_qr': {
+        if (managedAuxUiSuppressed(msg.turnId, msg.dispatchAttempt)) break;
+        try {
+          await scopedReply(JSON.stringify({ image_key: msg.imageKey }), 'image', msg.turnId);
+        } catch (err: any) {
+          logger.error(`[${t}] Failed to deliver credential bootstrap QR to Lark: ${err.message}`);
+        }
+        break;
+      }
+
       case 'tui_prompt': {
         // AI detected an interactive TUI prompt — post card to thread
         if (!ownsLifecycleMutation()) {
@@ -5986,6 +6004,30 @@ function setupWorkerHandlers(
             try {
               await scopedReply(tr('worker.adopted_session_exited', undefined, loc), 'text', undefined);
             } catch { /* best effort */ }
+          }
+          break;
+        }
+
+        // Exit 78 is reserved by credential-bootstrap-runner for an
+        // incomplete/failed login. An automatic restart would repeatedly
+        // launch an interactive auth flow and can spam links/device codes.
+        // Preserve the session, but require an explicit /restart retry.
+        if (msg.code === 78 && ds.session.credentialIsolation) {
+          logger.warn(`[${t}] Credential bootstrap failed; waiting for explicit /restart`);
+          restartCounts.delete(ds.session.sessionId);
+          killWorker(ds);
+          ds.lastScreenStatus = 'idle';
+          clearUsageRefreshTimer(ds);
+          if (!suppressExitUi) {
+            try {
+              await scopedReply(
+                '🔐 登录未完成或校验失败，业务命令尚未执行。请完成话题中显示的登录步骤后发送 /restart 重试。',
+                'text',
+                msg.turnId,
+              );
+            } catch (replyErr) {
+              logger.error(`[${t}] Failed to deliver credential bootstrap failure: ${replyErr}`);
+            }
           }
           break;
         }
@@ -7054,11 +7096,12 @@ function reserveWorkerGeneration(ds: DaemonSession): number {
  * a fresh CLI, which the sandbox wraps normally.
  */
 export function adoptSandboxBlocked(
-  botCfg: { sandbox?: boolean; readIsolation?: boolean; apiOnly?: boolean },
+  botCfg: { sandbox?: boolean; readIsolation?: boolean; apiOnly?: boolean; credentialIsolation?: { enabled?: boolean } },
   session?: { sandbox?: boolean; chatId?: string },
 ): boolean {
   return botCfg.sandbox === true
     || botCfg.readIsolation === true
+    || botCfg.credentialIsolation?.enabled === true
     // A core-only (apiOnly) bot — or a session on a synthetic HTTP virtual chat —
     // must NOT adopt-observe a pre-existing external CLI: that CLI runs fully
     // unisolated (the adopt observe branch returns before any fs-policy build),

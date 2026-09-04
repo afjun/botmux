@@ -35,6 +35,12 @@ export interface FsRule {
   access: FsAccess;
   /** Where the rule came from — for the dashboard policy viewer / path tester. */
   source: FsRuleSource;
+  /** Linux-only bind source. When present, the host path at `bindSource` is
+   * mounted at `path` inside bwrap. Credential isolation uses this to replace a
+   * tool's shared HOME credential path without exposing the owner store at its
+   * host location inside the sandbox. */
+  bindSource?: string;
+  bindKind?: 'file' | 'directory';
 }
 
 export interface FsPolicy {
@@ -113,6 +119,14 @@ export interface FsPolicyContext {
   net?: boolean;
   /** Seatbelt write-allow regex passthrough (see FsPolicy.writeRegexes). */
   writeRegexes?: readonly string[];
+  /** Frozen owner-private source → tool credential target bindings. Both paths
+   * are canonical absolute host paths; the worker creates their declared shape
+   * before compiling the sandbox. */
+  credentialMounts?: readonly {
+    source: string;
+    target: string;
+    kind: 'file' | 'directory';
+  }[];
   /** FALSE = a no-Lark-transport session (core-only apiOnly bot or HTTP virtual
    *  chat). Generic read-isolation is NOT a credential boundary: it still grants
    *  the bot's own lark-cli identity readWrite AND, when workingDir defaults to
@@ -259,7 +273,13 @@ export function mergeFsRules(candidates: readonly FsRule[]): FsRule[] {
   for (const c of candidates) {
     const path = normalizeFsPath(c.path);
     if (!path) continue;
-    const rule: FsRule = { path, access: c.access, source: c.source };
+    const bindSource = c.bindSource ? normalizeFsPath(c.bindSource) ?? undefined : undefined;
+    const rule: FsRule = {
+      path,
+      access: c.access,
+      source: c.source,
+      ...(bindSource ? { bindSource, bindKind: c.bindKind } : {}),
+    };
     const prev = byPath.get(path);
     if (!prev) { byPath.set(path, rule); continue; }
     const rankNew = SOURCE_RANK[rule.source], rankOld = SOURCE_RANK[prev.source];
@@ -399,7 +419,7 @@ function linuxBaseline(h: string): FsRule[] {
  * fail-closed, never fail-open (codex P1). Carries `.kind` so callers/tests can
  * branch without string-matching the message. */
 export class FsPolicyConfigError extends Error {
-  readonly kind: 'external-bots-config' | 'working-dir-is-authority' | 'bots-config-in-carveout';
+  readonly kind: 'external-bots-config' | 'working-dir-is-authority' | 'bots-config-in-carveout' | 'credential-bind-unsupported';
   constructor(kind: FsPolicyConfigError['kind'], message: string) {
     super(message);
     this.name = 'FsPolicyConfigError';
@@ -530,8 +550,32 @@ export function buildFsPolicy(ctx: FsPolicyContext): FsPolicy {
   // These MUST stay granted even for a no-transport turn, else the CLI can't
   // authenticate and the core functionality breaks. The no-Lark-transport gate
   // only denies Feishu-authority paths (below), never the CLI's own auth.
-  push(ctx.authPaths, 'readWrite', 'adapter');
+  // Filter out authPaths that are covered by credential isolation mounts
+  const effectiveAuthPaths = ctx.credentialMounts?.length
+    ? (ctx.authPaths ?? []).filter(p => {
+        const normalized = normalizeFsPath(p);
+        if (!normalized) return true;
+        return !ctx.credentialMounts!.some(mount => {
+          const mk = normalizeFsPath(mount.target);
+          return mk && (normalized === mk || normalized.startsWith(mk + '/'));
+        });
+      })
+    : ctx.authPaths;
+  push(effectiveAuthPaths, 'readWrite', 'adapter');
   if (!ctx.redirectedCliData) push(ctx.cliDataPaths, 'readWrite', 'adapter');
+
+  // Credential mounts are mandatory same-path overrides. The bind source is
+  // deliberately not granted at its host path, so an isolated CLI sees the
+  // credential only where the corresponding tool expects it.
+  for (const mount of ctx.credentialMounts ?? []) {
+    candidates.push({
+      path: mount.target,
+      access: 'readWrite',
+      source: 'mandatory',
+      bindSource: mount.source,
+      bindKind: mount.kind,
+    });
+  }
 
   // botmux internals. workingDir/extraWrite/readonlyRoots are FAIL-CLOSED against
   // the authority roots for a no-transport turn (dropAuthority is identity when
@@ -811,6 +855,12 @@ const SEATBELT_BASE_PROFILE = '/System/Library/Sandbox/Profiles/bsd.sb';
  * wins, matching accessForPath()).
  */
 export function compileToSeatbelt(policy: FsPolicy): string {
+  if (policy.rules.some(rule => rule.bindSource)) {
+    throw new FsPolicyConfigError(
+      'credential-bind-unsupported',
+      'owner credential source-to-target mounts require Linux bubblewrap',
+    );
+  }
   const lines = [
     '(version 1)',
     '(deny default)',
@@ -925,6 +975,9 @@ export interface BwrapCompilation {
    *  pre-exist) are removed at teardown IFF still empty (never a recursive rm —
    *  content written by the host/a concurrent process is preserved). */
   maskMounts: { path: string; kind: 'dir' | 'file' }[];
+  /** Source-to-target bind mountpoints whose host source and destination shape
+   * must be validated/prepared before spawning bwrap. */
+  bindMounts: { source: string; target: string; kind: 'dir' | 'file' }[];
 }
 
 /**
@@ -953,6 +1006,7 @@ export function compileToBwrap(policy: FsPolicy, opts: CompileBwrapOpts): BwrapC
   const a: string[] = [];
   const emptyFiles: { path: string; maskedPath: string }[] = [];
   const maskMounts: { path: string; kind: 'dir' | 'file' }[] = [];
+  const bindMounts: { source: string; target: string; kind: 'dir' | 'file' }[] = [];
   a.push('--tmpfs', '/');
   a.push('--proc', '/proc', '--dev', '/dev');
   a.push('--tmpfs', '/tmp', '--tmpfs', '/run', '--tmpfs', '/var/tmp', '--tmpfs', '/dev/shm');
@@ -1015,7 +1069,18 @@ export function compileToBwrap(policy: FsPolicy, opts: CompileBwrapOpts): BwrapC
       }
       continue;
     }
-    a.push(r.access === 'readWrite' ? '--bind' : '--ro-bind', r.path, r.path);
+    if (r.bindSource) {
+      bindMounts.push({
+        source: r.bindSource,
+        target: r.path,
+        kind: r.bindKind === 'file' ? 'file' : 'dir',
+      });
+    }
+    a.push(
+      r.access === 'readWrite' ? '--bind' : '--ro-bind',
+      r.bindSource ?? r.path,
+      r.path,
+    );
     exposed.push(r.path);
   }
   // Re-seal white-in-black deny masks read-only AFTER their nested carve-out
@@ -1038,7 +1103,7 @@ export function compileToBwrap(policy: FsPolicy, opts: CompileBwrapOpts): BwrapC
   a.push(...unshares);
   if (!policy.net) a.push('--unshare-net');
   a.push('--die-with-parent', '--new-session', '--chdir', opts.chdir);
-  return { args: a, emptyFiles, maskMounts };
+  return { args: a, emptyFiles, maskMounts, bindMounts };
 }
 
 // ───────────────────────────── legacy config migration ───────────────────────

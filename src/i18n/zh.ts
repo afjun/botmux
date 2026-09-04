@@ -57,6 +57,11 @@ export const messages: Record<string, string> = {
   'card.body.cli_no_cli_resume': '{cliName} 不支持从命令行精确恢复指定会话，可在飞书内 resume。',
   'card.body.working_dir': '📁 工作目录：',
   'card.body.choose_label': '选择:',
+
+  // ─── 凭证隔离 ──────────────────────────────────────────────────────────────
+  'daemon.credential_owner_required': '❌ 此机器人已开启 owner 凭证隔离，但无法通过飞书 Open ID 获取发起人的邮箱。请确认机器人已开通通讯录基础信息和邮箱读取权限后，新建会话重试。',
+  'daemon.credential_owner_mismatch': '🔒 这个会话绑定了其他 owner 的凭证。请由会话发起人继续操作，或新建一个属于你的会话。',
+
   'card.usage_limit.retry_at': '⚠️ 当前已达到 {cliName} 使用限额。请在 {retryLabel} 后再试。',
   'card.usage_limit.retry_ready': '✅ {cliName} 限额预计已刷新。你可以重发上一条任务，或直接发送新消息。',
   'card.private.snapshot_note': '🔒 仅你可见的静态快照（不会实时刷新）。点「打开 Web 终端」查看实时画面。',

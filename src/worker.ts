@@ -77,6 +77,11 @@ import { ReadyGate, shouldArmReadyGate } from './utils/ready-gate.js';
 import { shouldRunStartupCommandsOnSpawn, shouldDeferInitialPromptForStartup } from './core/startup-commands.js';
 import { sanitizePerBotEnv } from './core/per-bot-env.js';
 import {
+  ensureCredentialBindSources,
+  resolveCredentialBindMounts,
+  resolvePendingCredentialBootstraps,
+} from './core/owner.js';
+import {
   evaluateVcMeetingManagedSend,
 } from './services/vc-meeting-send-policy.js';
 import { TurnTerminalDeduper } from './services/turn-terminal-deduper.js';
@@ -1836,6 +1841,11 @@ let currentBotmuxTurnId: string | undefined;
 let currentBotmuxDispatchAttempt: number | undefined;
 let currentVcMeetingImTurnOrigin: VcMeetingImTurnOrigin | undefined;
 let durableTurnInFlight = false;
+let credentialBootstrapActive = false;
+let credentialBootstrapTail = '';
+const notifiedCredentialBootstrapValues = new Set<string>();
+let credentialBootstrapQrTimer: ReturnType<typeof setTimeout> | null = null;
+let lastCredentialBootstrapQrHash = '';
 function publishSandboxRelayCapability(opts: { failClosed?: boolean } = {}): boolean {
   const capability = {
     token: randomBytes(32).toString('hex'),
@@ -4952,6 +4962,64 @@ async function captureAndUpload(): Promise<void> {
   });
 }
 
+/** Capture an interactive login QR independently of the user's streaming-card
+ * display mode. Bootstrap runs before the first business prompt, when the
+ * ordinary screenshot loop is intentionally dormant. */
+async function captureAndUploadCredentialBootstrapQr(): Promise<void> {
+  if (!credentialBootstrapActive || apiOnlyForUpload) return;
+  if (!larkAppIdForUpload || !larkAppSecretForUpload) return;
+
+  let png: Buffer;
+  let hash: string;
+  try {
+    const pipeResult = await snapshotToPng(backend, renderCols, renderRows);
+    if (pipeResult) {
+      hash = createHash('md5').update(pipeResult.ansi).digest('hex');
+      png = pipeResult.png;
+    } else {
+      if (!renderer) return;
+      const term = renderer.xterm;
+      const snap = renderer.rawSnapshot();
+      hash = createHash('md5').update(snap).digest('hex');
+      png = captureToPng(term, {
+        cols: clamp(term.cols, MIN_RENDER_COLS, MAX_RENDER_COLS),
+        rows: clamp(term.rows, MIN_RENDER_ROWS, MAX_RENDER_ROWS),
+        startY: term.buffer.active.baseY,
+      });
+    }
+    if (hash === lastCredentialBootstrapQrHash) return;
+    lastCredentialBootstrapQrHash = hash;
+  } catch (err: any) {
+    logError(`Credential bootstrap QR render failed: ${err?.message ?? err}`);
+    return;
+  }
+
+  try {
+    const imageKey = await uploadImageBuffer(
+      larkAppIdForUpload,
+      larkAppSecretForUpload,
+      png,
+      larkBrandForUpload,
+    );
+    send({
+      type: 'credential_bootstrap_qr',
+      imageKey,
+      turnId: currentBotmuxTurnId,
+      dispatchAttempt: currentBotmuxDispatchAttempt,
+    });
+  } catch (err: any) {
+    logError(`Credential bootstrap QR upload failed: ${err?.message ?? err}`);
+  }
+}
+
+function scheduleCredentialBootstrapQrCapture(): void {
+  if (credentialBootstrapQrTimer) clearTimeout(credentialBootstrapQrTimer);
+  credentialBootstrapQrTimer = setTimeout(() => {
+    credentialBootstrapQrTimer = null;
+    void captureAndUploadCredentialBootstrapQr();
+  }, 700);
+}
+
 function applyDisplayMode(mode: DisplayMode): void {
   displayMode = mode;
   lastShotHash = '';
@@ -6021,6 +6089,55 @@ function cancelAmbiguousSubmissionAfterFailure(
   }
 }
 
+/** Relay interactive login affordances from the sandbox PTY back to the Lark
+ * topic. The full terminal remains available for QR rendering; URLs and short
+ * device-code lines are additionally posted as text so login does not require
+ * the user to manually run an initialization command. */
+function maybeNotifyCredentialBootstrapOutput(data: string): void {
+  const plain = stripAnsiForLog(data);
+  credentialBootstrapTail = tailChars(credentialBootstrapTail + plain, 4_096);
+  if (credentialBootstrapTail.includes('[botmux] 正在初始化')) {
+    if (!credentialBootstrapActive) {
+      credentialBootstrapActive = true;
+      send({
+        type: 'user_notify',
+        message: '🔐 正在自动初始化 owner 专属凭证。登录链接或设备码会直接发到本话题；如工具仅显示二维码，请打开当前会话的网页终端扫码。',
+        turnId: currentBotmuxTurnId,
+      });
+    }
+  }
+  if (!credentialBootstrapActive) return;
+
+  const values = new Set<string>();
+  for (const match of credentialBootstrapTail.matchAll(/https?:\/\/[^\s<>"']+/g)) {
+    values.add(match[0].replace(/[),.;]+$/, ''));
+  }
+  for (const line of credentialBootstrapTail.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed.length <= 512 && /(?:设备码|验证码|device\s*(?:code)?|verification\s*code)/i.test(trimmed)) {
+      values.add(trimmed);
+    }
+  }
+  for (const value of values) {
+    if (notifiedCredentialBootstrapValues.has(value)) continue;
+    notifiedCredentialBootstrapValues.add(value);
+    send({ type: 'user_notify', message: `🔑 ${value}`, turnId: currentBotmuxTurnId });
+  }
+  if (/(?:二维码|scan\s+(?:the\s+)?qr|qr\s*code)/i.test(credentialBootstrapTail)
+    || /[█▀▄]{4,}/.test(credentialBootstrapTail)) {
+    scheduleCredentialBootstrapQrCapture();
+  }
+  if (credentialBootstrapTail.includes('登录未完成或校验失败')
+    || credentialBootstrapTail.includes('凭证初始化等待超时')
+    || credentialBootstrapTail.includes('凭证初始化全部完成')) {
+    credentialBootstrapActive = false;
+    if (credentialBootstrapQrTimer) {
+      clearTimeout(credentialBootstrapQrTimer);
+      credentialBootstrapQrTimer = null;
+    }
+  }
+}
+
 function onPtyData(data: string): void {
   data = splitCodexAppControl(data);
   if (data.length === 0) return;
@@ -6030,6 +6147,7 @@ function onPtyData(data: string): void {
   maybeCaptureKiroSessionId(data);
   captureWorkflowTranscript(data);
   renderer?.write(data);
+  maybeNotifyCredentialBootstrapOutput(data);
 
   // In tmux-attach mode, each web client has its own tmux attach PTY —
   // no relay needed. In non-tmux mode AND in pipe mode (adopt-bridge),
@@ -8058,6 +8176,21 @@ async function spawnCli(
   // local confinement is meaningless there and must be bypassed on ALL
   // platforms, or a sandbox-enabled bot bricks the moment it switches to riff.
   const riffRemoteBackend = !localSandboxApplies(effectiveBackendType);
+  const ownerCredentialIsolation = !!cfg.credentialIsolation || !!cfg.credentialPrincipal;
+  if (ownerCredentialIsolation) {
+    if (!cfg.credentialIsolation || !cfg.credentialPrincipal) {
+      throw new Error('credential isolation snapshot is incomplete (principal and mounts are both required)');
+    }
+    if (process.platform !== 'linux') {
+      throw new Error('owner credential isolation requires Linux bubblewrap');
+    }
+    if (effectiveBackendType !== 'pty' && effectiveBackendType !== 'tmux') {
+      throw new Error(`owner credential isolation does not support backend ${effectiveBackendType}`);
+    }
+    if (cfg.sandbox !== true) {
+      throw new Error('owner credential isolation requires the frozen file sandbox');
+    }
+  }
   if (riffRemoteBackend && (cfg.sandbox === true || cfg.readIsolation === true)) {
     log('Sandbox flag set but backend is riff (remote sandbox, no local process) — local sandbox bypassed');
   }
@@ -9169,6 +9302,32 @@ async function spawnCli(
       } catch { /* diagnostics only — never block the spawn */ }
     }
 
+    const credentialBindMounts = ownerCredentialIsolation
+      ? resolveCredentialBindMounts({
+          credentialPrincipal: cfg.credentialPrincipal,
+          credentialIsolation: cfg.credentialIsolation,
+        }, sandboxHome, canonical(configuredBotmuxHome))
+      : [];
+    ensureCredentialBindSources(credentialBindMounts);
+    const credentialBootstraps = ownerCredentialIsolation
+      ? resolvePendingCredentialBootstraps(
+          credentialBindMounts,
+          canonical(configuredBotmuxHome),
+          cfg.credentialPrincipal!.ownerId,
+          command => {
+            // DevFlow's PATH entry is a shell wrapper whose second-stage binary
+            // lives outside PATH under ~/.devflow-cli/deps. Resolve that real
+            // executable explicitly; prepareDirectSandbox publishes a same-name
+            // shim so both bootstrap and later agent commands use it in bwrap.
+            if (command === 'devflow-cli') {
+              const real = join(sandboxHome, '.devflow-cli', 'deps', 'devflow-cli');
+              try { if (existsSync(real)) return canonical(real); } catch { /* fall through */ }
+            }
+            return locateOnPath(command) ?? undefined;
+          },
+        )
+      : [];
+
     const fsPolicyCtx = {
       platform: process.platform as 'darwin' | 'linux',
       homeDir: sandboxHome,
@@ -9243,7 +9402,14 @@ async function spawnCli(
           .filter((r): r is string => !!r)
           .map(expandTildeLexical),
       })),
-      execPaths: keepExisting([...execDirs, ...execCarve]),
+      execPaths: keepExisting([
+        ...execDirs,
+        ...execCarve,
+        ...credentialBootstraps.flatMap(spec => [
+          dirname(spec.command),
+          ...(spec.checkCommand ? [dirname(spec.checkCommand.command)] : []),
+        ]),
+      ]),
       readonlyRoots: keepExisting([
         ...(cfg.skillReadonlyRoots ?? []),
         ...piInitialPromptReadonlyRoots,
@@ -9260,6 +9426,11 @@ async function spawnCli(
       mandatoryDenyPaths,
       mandatoryDenyRegexes,
       mandatoryReadOnlyPaths,
+      credentialMounts: credentialBindMounts.map(mount => ({
+        source: canonical(mount.source),
+        target: mount.target,
+        kind: mount.kind,
+      })),
       net: cfg.sandboxNetwork !== false,
       // Claude Code saves ~/.claude.json atomically via a PID/random-suffixed
       // sibling — only relevant when the data dir is NOT redirected to BOT_HOME.
@@ -9296,7 +9467,7 @@ async function spawnCli(
     // literal rule; bwrap masks with a tmpfs whose mountpoint the mount creates).
     policy.rules = policy.rules.filter(r => {
       if (r.access === 'deny') return true;
-      try { return existsSync(r.path); } catch { return false; }
+      try { return existsSync(r.bindSource ?? r.path); } catch { return false; }
     });
 
     if (process.platform === 'darwin') {
@@ -9341,6 +9512,7 @@ async function spawnCli(
         home: sandboxHome,
         cliBin: cliAdapter.resolvedBin,
         cliArgs: args,
+        credentialBootstraps,
         trustedBotmuxCommandPaths: [defaultGatewayEntry().command],
         mcpGatewaySocketPath: sessionMcpGatewayHost?.socketPath,
       });

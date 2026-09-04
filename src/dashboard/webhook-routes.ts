@@ -10,6 +10,7 @@ import {
   type TriggerLogTarget,
 } from '../services/trigger-log-store.js';
 import { extractDedupKey } from '../services/webhook-lifecycle-extractors.js';
+export { extractCredentialOwnerCandidates } from '../services/credential-owner-extractor.js';
 import {
   renderConnectorTopicTemplate,
   renderConnectorMessageTemplate,

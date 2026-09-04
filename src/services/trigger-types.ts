@@ -72,6 +72,8 @@ export type TriggerErrorCode =
   | 'dry_run'
   | 'invalid_signature'
   | 'chat_not_allowed'
+  | 'credential_owner_required'
+  | 'credential_owner_mismatch'
   | 'legacy_workflow_retired'
   | 'group_create_failed'
   | 'lifecycle_extract_failed'

@@ -167,9 +167,12 @@ export function createSession(
   title: string,
   chatType?: 'group' | 'p2p',
   scope?: 'thread' | 'chat',
+  initial?: Pick<Session, 'credentialPrincipal' | 'credentialIsolation' | 'sandbox' | 'larkAppId'>,
 ): Session {
   load();
   const session: Session = {
+    ...initial,
+    // Security and routing identity cannot be replaced by `initial`.
     sessionId: randomUUID(),
     chatId,
     chatType,

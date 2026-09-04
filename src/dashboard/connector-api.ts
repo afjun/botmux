@@ -103,6 +103,42 @@ function normalizeLifecycleExtractors(v: unknown): ConnectorDefinition['lifecycl
   return { dedupKey: r.dedupKey.trim() };
 }
 
+const CONNECTOR_EXTRACTOR_UNSAFE_SEGMENTS = new Set(['__proto__', 'prototype', 'constructor']);
+
+function validCredentialOwnerPath(value: string, requireRoot: boolean): boolean {
+  if (!value || value.length > 256) return false;
+  if (requireRoot && value !== '$' && !value.startsWith('$.')) return false;
+  const withoutRoot = value === '$' ? '' : value.startsWith('$.') ? value.slice(2) : value;
+  if (!withoutRoot) return value === '$';
+  const segments = withoutRoot.split('.');
+  return segments.every(segment => /^[A-Za-z0-9_-]+$/.test(segment)
+    && !CONNECTOR_EXTRACTOR_UNSAFE_SEGMENTS.has(segment));
+}
+
+export function normalizeCredentialOwner(
+  value: unknown,
+  prior: ConnectorDefinition['credentialOwner'] | undefined,
+): { ok: true; value?: ConnectorDefinition['credentialOwner'] } | { ok: false; error: string } {
+  if (value === null) return { ok: true, value: undefined };
+  if (value === undefined) return { ok: true, value: prior };
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { ok: false, error: 'credential_owner_extractor_invalid' };
+  }
+  const raw = value as Record<string, unknown>;
+  if (Object.keys(raw).some(key => !['path', 'openIdPath', 'emailPath'].includes(key))) {
+    return { ok: false, error: 'credential_owner_extractor_invalid' };
+  }
+  const path = typeof raw.path === 'string' ? raw.path.trim() : '';
+  const openIdPath = typeof raw.openIdPath === 'string' ? raw.openIdPath.trim() : '';
+  const emailPath = typeof raw.emailPath === 'string' ? raw.emailPath.trim() : '';
+  if (!validCredentialOwnerPath(path, true)
+    || !validCredentialOwnerPath(openIdPath, false)
+    || !validCredentialOwnerPath(emailPath, false)) {
+    return { ok: false, error: 'credential_owner_extractor_invalid' };
+  }
+  return { ok: true, value: { path, openIdPath, emailPath } };
+}
+
 function normalizeTopicMessage(
   value: unknown,
   prior: ConnectorDefinition['topicMessage'] | undefined,
@@ -272,6 +308,8 @@ function normalizeConnectorInput(
   if (!topicMessage.ok) return topicMessage;
   const ownerNotification = normalizeOwnerNotification(c.ownerNotification, prior?.ownerNotification);
   if (!ownerNotification.ok) return ownerNotification;
+  const credentialOwner = normalizeCredentialOwner(c.credentialOwner, prior?.credentialOwner);
+  if (!credentialOwner.ok) return credentialOwner;
 
   const now = new Date().toISOString();
   const next: ConnectorDefinition = {
@@ -320,6 +358,7 @@ function normalizeConnectorInput(
     },
     topicMessage: topicMessage.value,
     ...(ownerNotification.value ? { ownerNotification: ownerNotification.value } : {}),
+    ...(credentialOwner.value ? { credentialOwner: credentialOwner.value } : {}),
     ...(bool(c.suppressFinalOutput, prior?.suppressFinalOutput ?? false) ? { suppressFinalOutput: true } : {}),
     loggingPolicy: {
       storePayload: bool(loggingPolicy.storePayload, prior?.loggingPolicy.storePayload ?? true),

@@ -18,6 +18,10 @@ import type { DaemonSession } from './types.js';
 import { sessionKey, larkTransportEnabled, isHttpVirtualSession } from './types.js';
 import type { TriggerRequest, TriggerResponse } from '../services/trigger-types.js';
 import type { CliTurnPayload } from '../types.js';
+import { getConnector } from '../services/connector-store.js';
+import { extractCredentialOwnerCandidates } from '../services/credential-owner-extractor.js';
+import { resolveSender, type ResolvedSender } from '../im/lark/identity-cache.js';
+import { freezeCredentialIsolation, ownerFromEmail } from './owner.js';
 
 export interface TriggerSessionDeps {
   larkAppId: string;
@@ -200,6 +204,23 @@ function resolveWorkingDir(larkAppId: string, chatId: string): { ok: true; worki
 function activeBySessionId(activeSessions: Map<string, DaemonSession>, sessionId: string): DaemonSession | undefined {
   for (const ds of activeSessions.values()) {
     if (ds.session.sessionId === sessionId) return ds;
+  }
+  return undefined;
+}
+
+async function resolveWebhookCredentialOwner(
+  req: TriggerRequest,
+  larkAppId: string,
+): Promise<ResolvedSender | undefined> {
+  if (req.source.type !== 'webhook' || !req.source.connectorId) return undefined;
+  const connector = getConnector(req.source.connectorId);
+  if (!connector || connector.target.botId !== larkAppId) return undefined;
+  const candidates = extractCredentialOwnerCandidates(req.envelope.payload, connector.credentialOwner);
+  for (const candidate of candidates) {
+    const sender = await resolveSender(larkAppId, candidate.openId, 'user');
+    if (!sender?.email) continue;
+    if (candidate.email && ownerFromEmail(candidate.email) !== ownerFromEmail(sender.email)) continue;
+    return sender;
   }
   return undefined;
 }
@@ -469,6 +490,30 @@ export async function triggerSessionTurn(
     ds = deps.activeSessions.get(sessionKey(chatId, larkAppId));
   }
 
+  const bot = getBot(larkAppId);
+  let newSessionCredentialState: ReturnType<typeof freezeCredentialIsolation> = {};
+  if ((!ds && bot.config.credentialIsolation?.enabled) || ds?.session.credentialIsolation) {
+    const credentialOwner = await resolveWebhookCredentialOwner(req, larkAppId);
+    if (!credentialOwner) {
+      return {
+        ok: false,
+        triggerId,
+        errorCode: 'credential_owner_required',
+        error: 'credential-isolated session requires a verified webhook owner',
+      };
+    }
+    if (ds?.session.credentialPrincipal
+      && ds.session.credentialPrincipal.openId !== credentialOwner.openId) {
+      return {
+        ok: false,
+        triggerId,
+        errorCode: 'credential_owner_mismatch',
+        error: 'webhook owner does not match the existing session credential owner',
+      };
+    }
+    if (!ds) newSessionCredentialState = freezeCredentialIsolation(bot.config.credentialIsolation, credentialOwner);
+  }
+
   if (dryRun) {
     return {
       ok: true,
@@ -629,7 +674,6 @@ export async function triggerSessionTurn(
     return { ok: false, errorCode: 'trigger_failed', error: wd.error };
   }
 
-  const bot = getBot(larkAppId);
   const chatMode: ChatMode = httpVirtual
     ? 'group'
     : await getChatMode(larkAppId, chatId, { forceRefresh: true });
@@ -650,9 +694,21 @@ export async function triggerSessionTurn(
     await deliverOwnerNotification(ownerNotification, larkAppId, chatId, scope, anchor);
   }
 
-  const session = sessionStore.createSession(chatId, anchor, triggerTitle(req), 'group');
+  // Keep the disabled path byte-for-byte compatible with the legacy call;
+  // only credential-isolated sessions need the atomic creation snapshot.
+  const session = newSessionCredentialState.credentialPrincipal
+    ? sessionStore.createSession(
+        chatId,
+        anchor,
+        triggerTitle(req),
+        'group',
+        scope,
+        { ...newSessionCredentialState, larkAppId },
+      )
+    : sessionStore.createSession(chatId, anchor, triggerTitle(req), 'group');
   const now = Date.now();
   session.larkAppId = larkAppId;
+  session.ownerOpenId = newSessionCredentialState.credentialPrincipal?.openId;
   session.scope = scope;
   if (shouldOpenOwnTopic && topicMessage === null && !ownerNotification) session.externalTriggerTopicless = true;
   session.lastMessageAt = new Date(now).toISOString();

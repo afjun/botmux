@@ -844,6 +844,9 @@ async function handleScheduleCommand(
       executionPosition,
       chatType: ds?.chatType === 'p2p' ? 'p2p' : 'topic_group',
       larkAppId,
+      credentialPrincipal: ds?.session.credentialPrincipal,
+      credentialIsolation: ds?.session.credentialIsolation,
+      sandbox: ds?.session.sandbox,
       deliver: 'origin',
       silent,
     });
@@ -1699,13 +1702,21 @@ export async function handleCommand(
             // Session. Preserve the old identity and explicitly persist scope so
             // repo switches cannot turn a chat session into a legacy scope-less
             // record that the CLI later mistakes for a thread.
-            const session = sessionStore.createSession(
+            const replacementArgs = [
               ds!.chatId,
               ds!.scope === 'chat' ? oldSession.rootMessageId : rootId,
               displayName,
               ds!.chatType,
               ds!.scope,
-            );
+            ] as const;
+            const session = oldSession.credentialPrincipal
+              ? sessionStore.createSession(...replacementArgs, {
+                  credentialPrincipal: oldSession.credentialPrincipal,
+                  credentialIsolation: oldSession.credentialIsolation,
+                  sandbox: oldSession.sandbox,
+                  larkAppId: ds!.larkAppId,
+                })
+              : sessionStore.createSession(...replacementArgs);
             ds!.session = session;
             ds!.lastUserPrompt = undefined;
             ds!.lastCliInput = undefined;

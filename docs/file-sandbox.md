@@ -13,6 +13,45 @@
 
 Linux 依赖 bubblewrap（bwrap），macOS 用同一份 policy 经 Seatbelt（`sandbox-exec`）落地；两平台统一走 fs-policy 三档白名单。除 riff 外的本地后端（pty/tmux/zellij…）都会包裹。
 
+### owner 凭证隔离（Linux）
+
+需要让同一台 Botmux 上的不同使用者复用各自登录态时，可在单个 bot 上增加：
+
+```json
+{
+  "credentialIsolation": {
+    "enabled": true,
+    "presets": {
+      "bytedcli": true,
+      "bytecloud": true,
+      "devflow": true,
+      "playwright": true
+    },
+    "mounts": []
+  }
+}
+```
+
+- 新会话通过发起人的飞书 Open ID 查询邮箱，并以邮箱前缀作为共享 key；凭证落在 `~/.botmux/owners/<邮箱前缀>/`，因此同一 owner 可跨 bot 复用。
+- 内置 preset 覆盖 BytedCLI、ByteCloud CLI、DevFlow 的登录状态和 Playwright MCP 浏览器 profile。缺少登录态时 Botmux 在同一个 bwrap 中自动执行登录命令，首条业务 prompt 在登录成功前不会发送；登录 URL/设备码会回传到话题，检测到二维码时还会上传当时的终端截图。Playwright 没有通用登录命令，访问具体站点时产生的 profile 会直接持久化。
+- `mounts` 支持按 `id` 覆盖/关闭 preset，或增加 `{id, kind, target, ownerSubdir, bootstrap}` 自定义映射。`target` 必须位于 `$HOME` 下，`ownerSubdir` 必须是 owner 根目录下的相对路径；配置在会话创建时冻结，所以修改后只影响新会话。
+- 开启后会话自动冻结 `sandbox: true`，当前仅支持 Linux bwrap 的 PTY/Tmux 会话。拿不到邮箱、挂载/登录失败、采用其他 backend 或 adopt 已运行进程时都会 fail-closed；未开启的 bot 完全沿用宿主机登录态。
+- 会话绑定唯一 credential principal。普通消息、Webhook 和会驱动 CLI 的卡片操作都要求操作者 Open ID 与 principal 一致；登录链接/二维码按本需求仍允许话题内所有成员看见。
+
+Webhook Connector 需要声明 owner 提取规则，例如 Meego payload：
+
+```json
+{
+  "credentialOwner": {
+    "path": "meego.owners",
+    "openIdPath": "open_id",
+    "emailPath": "email"
+  }
+}
+```
+
+候选人按 payload 顺序处理。目标 bot 会用通讯录 API 重新校验 Open ID 对应邮箱，只有邮箱前缀与 payload 一致的第一个候选人能成为 owner；机器人需具备用户基础信息和邮箱读取权限。飞书 Open ID 是应用维度的，因此 payload 必须携带目标 bot 能查询的 Open ID；来自其他应用且不可解析的 Open ID 会 fail-closed。
+
 ## 工作原理
 
 ```

@@ -6,6 +6,7 @@
 import { execSync } from 'node:child_process';
 import { basename as pathBasename, dirname, join } from 'node:path';
 import { config } from '../../config.js';
+import { credentialPrincipalCanDrive } from '../../core/owner.js';
 import { getBot, getAllBots, getOwnerOpenId } from '../../bot-registry.js';
 import { canOperate, canTalk } from './event-dispatcher.js';
 import { updateMessage, deleteMessage, replyMessage, sendMessage, sendUserMessage, sendEphemeralCard, getMessageDetail, isHumanOpenId, resolveUserUnionId as defaultResolveUserUnionId } from './client.js';
@@ -429,6 +430,10 @@ export async function commitRepoSelection(
   },
 ): Promise<void> {
   const { ds, rootId, cardMessageId, larkAppId, operatorOpenId, activeSessions, sessionReply } = ctx;
+  if (!credentialPrincipalCanDrive(ds.session, operatorOpenId)) {
+    logger.info(`[${tag(ds)}] Repo selection blocked for non-principal credential owner: ${operatorOpenId ?? '?'}`);
+    return;
+  }
   const locTarget = localeForBot(ds.larkAppId);
   // `/close` deletes the active-map entry without touching sessionId or
   // pendingRepo — identity against the map is the only tell that the session
@@ -685,13 +690,21 @@ export async function commitRepoSelection(
     // `oc_...` chat id, not the traceable `om_...` message root stored on
     // Session. Preserve the old identity and explicitly persist scope so card
     // switches cannot recreate the session as a legacy scope-less thread.
-    const session = sessionStore.createSession(
+    const replacementArgs = [
       ds.chatId,
       ds.scope === 'chat' ? oldSession.rootMessageId : rootId,
       dirLabel,
       ds.chatType,
       ds.scope,
-    );
+    ] as const;
+    const session = oldSession.credentialPrincipal
+      ? sessionStore.createSession(...replacementArgs, {
+          credentialPrincipal: oldSession.credentialPrincipal,
+          credentialIsolation: oldSession.credentialIsolation,
+          sandbox: oldSession.sandbox,
+          larkAppId: ds.larkAppId,
+        })
+      : sessionStore.createSession(...replacementArgs);
     ds.session = session;
     ds.lastUserPrompt = undefined;
     ds.lastCliInput = undefined;
@@ -1700,6 +1713,11 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
     const closedForCtx = !ds && value?.action === 'resume' && value?.session_id
       ? sessionStore.getSession(value.session_id)
       : undefined;
+    const credentialSession = ds?.session ?? closedForCtx;
+    if (credentialSession && !credentialPrincipalCanDrive(credentialSession, operatorOpenId)) {
+      logger.info(`Card action "${value.action}" blocked for non-principal credential owner: ${operatorOpenId}`);
+      return { toast: { type: 'warning', content: t('daemon.credential_owner_mismatch', undefined, localeForBot(larkAppId)) } };
+    }
     const effectiveAppId = larkAppId ?? ds?.larkAppId ?? closedForCtx?.larkAppId;
     const chatId = ds?.chatId ?? closedForCtx?.chatId;
     // pendingRepo 阶段，会话发起人（含 chat-granted 用户）可以 skip_repo / 手动填目录
@@ -2051,6 +2069,9 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       const locDs = localeForBot(ds?.larkAppId ?? larkAppId);
       if (!ds) {
         return { toast: { type: 'warning', content: t('card.voice.toast_session_gone', undefined, locDs) } };
+      }
+      if (!credentialPrincipalCanDrive(ds.session, operatorOpenId)) {
+        return { toast: { type: 'warning', content: t('daemon.credential_owner_mismatch', undefined, locDs) } };
       }
       // 权限：仅 canTalk / canOperate 用户可点；其他人提示需授权（无声门会让人以为按钮坏了）。
       // 传 ds.chatType：p2pOpen 的 bot 在私聊里，对方点自己会话的卡片按钮应与其 talk 权一致
@@ -3044,6 +3065,9 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
     const sKey = larkAppId ? sessionKey(rootId, larkAppId) : rootId;
     const ds = activeSessions.get(sKey);
     if (!ds) return;
+    if (!credentialPrincipalCanDrive(ds.session, operatorOpenId)) {
+      return { toast: { type: 'warning', content: t('daemon.credential_owner_mismatch', undefined, localeForBot(ds.larkAppId)) } };
+    }
     const sourceSession = ds.session;
     if (isSessionTransferring(ds)) {
       return { toast: { type: 'warning', content: t('cmd.session.transfer_in_progress', undefined, localeForBot(ds.larkAppId)) } };

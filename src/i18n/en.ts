@@ -54,6 +54,11 @@ export const messages: Record<string, string> = {
   'card.body.cli_no_cli_resume': '_{cliName} cannot resume a specific session from the CLI; you can resume here in Lark._',
   'card.body.working_dir': '📁 Working dir:',
   'card.body.choose_label': 'Choice:',
+
+  // ─── Credential isolation ─────────────────────────────────────────────────
+  'daemon.credential_owner_required': '❌ This bot requires owner-isolated credentials, but the initiator email could not be resolved from the Lark Open ID. Grant the contact profile and email scopes, then start a new session.',
+  'daemon.credential_owner_mismatch': '🔒 This session is bound to another credential owner. Ask the initiator to continue, or start your own session.',
+
   'card.usage_limit.retry_at': '⚠️ {cliName} usage limit has been reached. Try again after {retryLabel}.',
   'card.usage_limit.retry_ready': '✅ {cliName} usage limit should have reset. Retry the last task, or send a new message.',
   'card.private.snapshot_note': '🔒 Private static snapshot (visible only to you, not live-updating). Tap Open Web Terminal for the live view.',

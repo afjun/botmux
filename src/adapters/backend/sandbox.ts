@@ -29,6 +29,7 @@ import {
   MCP_GATEWAY_REQUIRED_ENV,
   MCP_GATEWAY_SOCKET_ENV,
 } from '../../core/plugins/mcp/environment.js';
+import type { CredentialBootstrapRunnerSpec } from '../../core/credential-bootstrap-runner.js';
 
 /** Verify (and best-effort auto-install) bubblewrap so the user needn't
  *  pre-install. Installs via the system package manager when the daemon can
@@ -550,6 +551,9 @@ export function prepareDirectSandbox(opts: {
   home: string;
   cliBin: string;
   cliArgs: string[];
+  /** Missing credential bootstraps to execute inside this exact bwrap namespace
+   * before the real CLI is started. */
+  credentialBootstraps?: readonly CredentialBootstrapRunnerSpec[];
   /** Absolute Botmux command paths already persisted in CLI MCP configs.
    * Bind the worker-generated relay shim at those exact paths so a stale or
    * tampered host wrapper cannot replace the trusted gateway entry. */
@@ -574,6 +578,12 @@ export function prepareDirectSandbox(opts: {
   const shim = join(shimBin, 'botmux');
   writeFileSync(shim, `#!/bin/sh\nexec node ${JSON.stringify(distCliJs())} "$@"\n`);
   chmodSync(shim, 0o755);
+  const devflowBootstrap = opts.credentialBootstraps?.find(spec => spec.id === 'devflow-auth');
+  if (devflowBootstrap) {
+    const devflowShim = join(shimBin, 'devflow-cli');
+    writeFileSync(devflowShim, `#!/bin/sh\nexec ${JSON.stringify(devflowBootstrap.command)} "$@"\n`);
+    chmodSync(devflowShim, 0o755);
+  }
 
   // usrmerge symlinks to replicate; deny rules that are FILES on the host need
   // a file-shaped mask, everything else (existing dir OR a not-yet-existing
@@ -620,6 +630,22 @@ export function prepareDirectSandbox(opts: {
   // record to reclaim them.
   const createdMasks: MaskMountEntry[] = [];
   try {
+    for (const mount of compiled.bindMounts) {
+      const sourceStat = lstatSync(mount.source);
+      if (sourceStat.isSymbolicLink()
+        || (mount.kind === 'dir' ? !sourceStat.isDirectory() : !sourceStat.isFile())) {
+        throw new Error(`credential bind source has wrong shape: ${mount.source}`);
+      }
+      if (existsSync(mount.target)) {
+        const targetStat = lstatSync(mount.target);
+        if (targetStat.isSymbolicLink()
+          || (mount.kind === 'dir' ? !targetStat.isDirectory() : !targetStat.isFile())) {
+          throw new Error(`credential bind target has wrong shape: ${mount.target}`);
+        }
+      } else {
+        createMaskMount(mount.target, mount.kind, createdMasks);
+      }
+    }
     for (const m of compiled.maskMounts) {
       // createMaskMount pushes each level into createdMasks IMMEDIATELY, so a
       // mid-chain throw still leaves the partial ancestors visible for rollback.
@@ -716,7 +742,15 @@ export function prepareDirectSandbox(opts: {
   // unresolvable path falls back to the lexical form (bwrap will fail-closed).
   let execBin = opts.cliBin;
   try { execBin = realpathSync(opts.cliBin); } catch { /* keep lexical; spawn fails closed */ }
-  args.push('--', execBin, ...opts.cliArgs);
+  if (opts.credentialBootstraps?.length) {
+    let runner = fileURLToPath(new URL('../../core/credential-bootstrap-runner.js', import.meta.url));
+    try { runner = realpathSync(runner); } catch { /* source-tree tests have no dist .js yet */ }
+    const nodeBin = realpathSync(process.execPath);
+    const encoded = Buffer.from(JSON.stringify(opts.credentialBootstraps), 'utf8').toString('base64url');
+    args.push('--', nodeBin, runner, encoded, execBin, ...opts.cliArgs);
+  } else {
+    args.push('--', execBin, ...opts.cliArgs);
+  }
 
   return {
     bin: 'bwrap',

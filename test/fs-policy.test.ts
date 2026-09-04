@@ -627,7 +627,7 @@ describe('compileToBwrap', () => {
 
   it('tmpfs root + primitives + ordered binds', () => {
     const p = buildFsPolicy(ctx({ platform: 'linux', homeDir: '/home/u', botHome: '/home/u/.botmux/bots/cli_self', botmuxHome: '/home/u/.botmux', sessionDataDir: '/home/u/.botmux/data', workingDir: '/home/u/proj' }));
-    const { args } = compileToBwrap(p, opts);
+    const { args, bindMounts } = compileToBwrap(p, opts);
     expect(args.slice(0, 2)).toEqual(['--tmpfs', '/']);
     expect(args).toContain('--proc');
     const roUsr = args.indexOf('/usr');
@@ -635,6 +635,34 @@ describe('compileToBwrap', () => {
     const rwProj = args.indexOf('/home/u/proj');
     expect(args[rwProj - 1]).toBe('--bind');
     expect(args).toContain('--chdir');
+  });
+
+  it('binds an owner-private credential source over the tool credential target', () => {
+    const p = buildFsPolicy(ctx({
+      platform: 'linux', homeDir: '/home/u', botHome: '/home/u/.botmux/bots/cli_self',
+      botmuxHome: '/home/u/.botmux', sessionDataDir: '/home/u/.botmux/data', workingDir: '/home/u/proj',
+      authPaths: ['/home/u/.local/share/bytedcli'],
+      credentialMounts: [{
+        source: '/home/u/.botmux/owners/alice/bytedcli',
+        target: '/home/u/.local/share/bytedcli',
+        kind: 'directory',
+      }],
+    }));
+
+    const { args, bindMounts } = compileToBwrap(p, opts);
+    const target = args.indexOf('/home/u/.local/share/bytedcli');
+    expect(target).toBeGreaterThan(1);
+    expect(args.slice(target - 2, target + 1)).toEqual([
+      '--bind',
+      '/home/u/.botmux/owners/alice/bytedcli',
+      '/home/u/.local/share/bytedcli',
+    ]);
+    expect(args.filter(value => value === '/home/u/.local/share/bytedcli')).toHaveLength(1);
+    expect(bindMounts).toEqual([{
+      source: '/home/u/.botmux/owners/alice/bytedcli',
+      target: '/home/u/.local/share/bytedcli',
+      kind: 'dir',
+    }]);
   });
 
   it('default: emits --unshare-pid (full process isolation) alongside the fresh --proc mount', () => {

@@ -73,6 +73,8 @@ import { resolveRegularGroupMode } from '../services/chat-reply-mode-store.js';
 import { beginReplyTargetTurn } from './reply-target.js';
 import { readDeferredTopicBinding, removeDeferredTopicBinding } from './deferred-topic-binding.js';
 import { escapeXmlTagLikeTokens } from '../utils/xml.js';
+import { resolveSender } from '../im/lark/identity-cache.js';
+import { freezeCredentialIsolation } from './owner.js';
 
 export { getAttachmentsDir } from './attachment-path.js';
 
@@ -2413,7 +2415,22 @@ export async function executeScheduledTask(
   const runtimeScope: 'thread' | 'chat' = deferredFreshTopic
     ? 'chat'
     : scope === 'chat' && anchor !== task.chatId ? 'thread' : scope;
-  const session = sessionStore.createSession(task.chatId, anchor, `${t('schedule.title_prefix', undefined, localeForBot(larkAppId))} ${task.name}`, task.chatType === 'p2p' ? 'p2p' : 'group');
+  if (bot.config.credentialIsolation?.enabled && (!task.credentialPrincipal || !task.credentialIsolation)) {
+    throw new Error(`scheduled task ${task.id} has no frozen credential owner; recreate it from an owner-bound session`);
+  }
+  const session = sessionStore.createSession(
+    task.chatId,
+    anchor,
+    `${t('schedule.title_prefix', undefined, localeForBot(larkAppId))} ${task.name}`,
+    task.chatType === 'p2p' ? 'p2p' : 'group',
+    undefined,
+    {
+      credentialPrincipal: task.credentialPrincipal,
+      credentialIsolation: task.credentialIsolation,
+      sandbox: task.sandbox,
+      larkAppId,
+    },
+  );
   const now = Date.now();
   session.larkAppId = larkAppId;
   session.scope = runtimeScope;
@@ -2618,6 +2635,17 @@ export async function spawnDashboardSession(
   let bot: ReturnType<typeof getBot>;
   try { bot = getBot(larkAppId); } catch { return { ok: false, error: 'bot_not_found' }; }
   const locale = localeForBot(larkAppId);
+  const ownerOpenId = args.ownerOpenId ?? getOwnerOpenId(larkAppId);
+  let credentialState: Pick<Session, 'credentialPrincipal' | 'credentialIsolation' | 'sandbox'> = {};
+  if (bot.config.credentialIsolation?.enabled) {
+    if (!ownerOpenId) return { ok: false, error: 'credential_owner_required' };
+    const owner = await resolveSender(larkAppId, ownerOpenId, 'user');
+    try {
+      credentialState = freezeCredentialIsolation(bot.config.credentialIsolation, owner);
+    } catch {
+      return { ok: false, error: 'credential_owner_required' };
+    }
+  }
 
   // chat-scope：锚点就是 chatId。先挡掉「同群同 bot 已有真会话」的撞键（会被
   // Map.set 覆盖而泄漏 worker）。queued 占位 / 纯 scratch 不算冲突。
@@ -2669,11 +2697,18 @@ export async function spawnDashboardSession(
   const codexAppMessageContext = composeSpawnCodexAppContext({ role, coworkers: args.coworkers, locale });
 
   const resolvedTitle = args.title || deriveSessionTitleFromContent(content);
-  const session = sessionStore.createSession(chatId, bannerMessageId ?? chatId, resolvedTitle, 'group');
+  const session = sessionStore.createSession(
+    chatId,
+    bannerMessageId ?? chatId,
+    resolvedTitle,
+    'group',
+    'chat',
+    { ...credentialState, larkAppId },
+  );
   const now = Date.now();
   session.larkAppId = larkAppId;
   session.scope = 'chat';
-  session.ownerOpenId = args.ownerOpenId ?? getOwnerOpenId(larkAppId);
+  session.ownerOpenId = ownerOpenId;
   session.creatorOpenId = session.ownerOpenId;
   if (args.ownerUnionId) session.ownerUnionId = args.ownerUnionId;
   session.lastMessageAt = new Date(now).toISOString();

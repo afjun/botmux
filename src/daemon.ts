@@ -23,6 +23,11 @@ import { reloadExactDaemonBotConfig } from './core/daemon-config-fence.js';
 import { writeHeartbeat } from './core/daemon-heartbeat.js';
 import { botmuxWrapperFiles, resolveBotmuxWrapperBinDir } from './core/botmux-wrapper.js';
 import {
+  CredentialOwnerRequiredError,
+  credentialPrincipalCanDrive,
+  freezeCredentialIsolation,
+} from './core/owner.js';
+import {
   evaluateOverload,
   formatOverloadAlert,
   buildOverloadAlertCard,
@@ -2144,6 +2149,9 @@ async function ensureVcMeetingReceiverSession(
   }
 
   const bot = getBot(selfAppId);
+  if (bot.config.credentialIsolation?.enabled) {
+    throw new Error('owner credential isolation does not support bot-originated VC receiver sessions without a human Open ID');
+  }
   const isolation = vcMeetingConsumerIsolationForBot(bot.config);
   if (!isolation.decision.ok) {
     throw new Error(
@@ -4524,7 +4532,15 @@ async function adoptCodexNotifierEvent(
   if (!ds) {
     const fallbackTitle = event.cwd.split(/[\\/]/).filter(Boolean).pop() ?? 'Codex App';
     const title = (event.title || `Codex App: ${fallbackTitle}`).slice(0, 50);
-    const session = sessionStore.createSession(chatId, cardMessageId, title, 'p2p');
+    let credentialState: Pick<Session, 'credentialPrincipal' | 'credentialIsolation' | 'sandbox'> = {};
+    if (botCfg.credentialIsolation?.enabled) {
+      const owner = await resolveSender(larkAppId, ownerOpenId, 'user');
+      credentialState = freezeCredentialIsolation(botCfg.credentialIsolation, owner);
+    }
+    const session = sessionStore.createSession(
+      chatId, cardMessageId, title, 'p2p', scope,
+      { ...credentialState, larkAppId },
+    );
     const now = Date.now();
     session.larkAppId = larkAppId;
     session.scope = scope;
@@ -4555,6 +4571,9 @@ async function adoptCodexNotifierEvent(
       await closeSessionHelper(session.sessionId);
       throw new Error('通知所在会话路由被一条待处理的持久会话占用');
     }
+  }
+  if (!credentialPrincipalCanDrive(ds.session, ownerOpenId)) {
+    throw new Error('通知操作者与会话 credential principal 不一致');
   }
 
   // Transfer guard OUTSIDE the launch branch. If the session is already on the
@@ -15494,6 +15513,17 @@ async function startInitialPassthroughSession(args: {
   const directChatSender = chatType === 'p2p'
     ? await resolveSender(larkAppId, senderOpenId, parsed.senderType, { messageId })
     : undefined;
+  const credentialSender = botCfg.credentialIsolation?.enabled
+    ? (directChatSender ?? await resolveSender(larkAppId, senderOpenId, parsed.senderType, { messageId }))
+    : directChatSender;
+  let credentialState: ReturnType<typeof freezeCredentialIsolation>;
+  try {
+    credentialState = freezeCredentialIsolation(botCfg.credentialIsolation, credentialSender);
+  } catch (error) {
+    if (!(error instanceof CredentialOwnerRequiredError)) throw error;
+    await sessionReply(anchor, tr('daemon.credential_owner_required', undefined, localeForBot(larkAppId)), 'text', larkAppId);
+    return;
+  }
   // Group cold-start passthroughs only need a stable caller identity while the
   // repo picker is pending. Avoid adding a contact lookup to every /goal start;
   // an optional display name can be learned later from the normal cache path.
@@ -15504,7 +15534,14 @@ async function startInitialPassthroughSession(args: {
     }
     : undefined);
   const rootIdForStore = scope === 'thread' ? anchor : messageId;
-  const session = sessionStore.createSession(chatId, rootIdForStore, commandContent.substring(0, 50), chatType);
+  const session = sessionStore.createSession(
+    chatId,
+    rootIdForStore,
+    commandContent.substring(0, 50),
+    chatType,
+    scope,
+    { ...credentialState, larkAppId },
+  );
   const now = Date.now();
   setDirectChatDisplayNameFromSender(session, chatType, directChatSender);
   session.larkAppId = larkAppId;
@@ -15923,13 +15960,27 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
       // disagree with activeSessions's key and downstream card buttons silently
       // break. Chat-scope keeps the inbound messageId as audit only.
       const cmdRootIdForStore = scope === 'thread' ? anchor : messageId;
-      const session = sessionStore.createSession(chatId, cmdRootIdForStore, cmdContent.substring(0, 50), chatType);
+      const commandSender = (botCfg.credentialIsolation?.enabled || chatType === 'p2p')
+        ? await resolveSender(larkAppId, senderOpenId, parsed.senderType, { messageId })
+        : undefined;
+      let credentialState: ReturnType<typeof freezeCredentialIsolation>;
+      try {
+        credentialState = freezeCredentialIsolation(botCfg.credentialIsolation, commandSender);
+      } catch (error) {
+        if (!(error instanceof CredentialOwnerRequiredError)) throw error;
+        await sessionReply(anchor, tr('daemon.credential_owner_required', undefined, localeForBot(larkAppId)), 'text', larkAppId);
+        return;
+      }
+      const session = sessionStore.createSession(
+        chatId, cmdRootIdForStore, cmdContent.substring(0, 50), chatType, scope,
+        { ...credentialState, larkAppId },
+      );
       const now = Date.now();
       if (chatType === 'p2p') {
         setDirectChatDisplayNameFromSender(
           session,
           chatType,
-          await resolveSender(larkAppId, senderOpenId, parsed.senderType, { messageId }),
+          commandSender,
         );
       }
       session.larkAppId = larkAppId;
@@ -16040,6 +16091,19 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
     parsed.mentions,
   );
   const newTopicSender = await resolveSender(larkAppId, senderOpenId, parsed.senderType, { messageId });
+  let credentialState: ReturnType<typeof freezeCredentialIsolation>;
+  try {
+    credentialState = freezeCredentialIsolation(botCfg.credentialIsolation, newTopicSender);
+  } catch (error) {
+    if (!(error instanceof CredentialOwnerRequiredError)) throw error;
+    await sessionReply(
+      anchor,
+      tr('daemon.credential_owner_required', undefined, localeForBot(larkAppId)),
+      'text',
+      larkAppId,
+    );
+    return;
+  }
 
   refreshCliVersion(botCfg);
 
@@ -16069,7 +16133,14 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
   // routing keys off chatId via sessionAnchorId(), so any value works.
   const rootIdForStore = scope === 'thread' ? anchor : messageId;
   const initialTurnTitle = (messageListener?.replyCardTitle ?? (ctx.forwardSeedData ? followupContent : content)).substring(0, 50);
-  const session = sessionStore.createSession(chatId, rootIdForStore, initialTurnTitle, chatType);
+  const session = sessionStore.createSession(
+    chatId,
+    rootIdForStore,
+    initialTurnTitle,
+    chatType,
+    scope,
+    { ...credentialState, larkAppId },
+  );
   const now = Date.now();
   setDirectChatDisplayNameFromSender(session, chatType, newTopicSender);
   const groupChatName = await groupChatNamePromise;
@@ -16379,6 +16450,18 @@ async function handleBotAdded(
     logger.debug(`[auto-start:入群] ${chatId.substring(0, 12)} 开关未开，忽略`);
     return;
   }
+  let joinCredentialState: Pick<Session, 'credentialPrincipal' | 'credentialIsolation' | 'sandbox'> = {};
+  if (botCfg.credentialIsolation?.enabled) {
+    const operator = operatorOpenId
+      ? await resolveSender(larkAppId, operatorOpenId, 'user')
+      : undefined;
+    try {
+      joinCredentialState = freezeCredentialIsolation(botCfg.credentialIsolation, operator);
+    } catch {
+      logger.warn(`[auto-start:入群] ${chatId.substring(0, 12)} 无法确认入群操作者 owner，拒绝创建隔离会话`);
+      return;
+    }
+  }
 
   const lockKey = `${larkAppId}:join:${chatId}`;
   const chatLiveKey = `${larkAppId}:${chatId}`;
@@ -16456,7 +16539,10 @@ async function handleBotAdded(
     const autoWt = willAutoWorktree(larkAppId, pinnedWorkingDir, pinnedFromBotDefault);
     refreshCliVersion(botCfg);
 
-    const session = sessionStore.createSession(chatId, anchor, title, chatType);
+    const session = sessionStore.createSession(
+      chatId, anchor, title, chatType, scope,
+      { ...joinCredentialState, larkAppId },
+    );
     const now = Date.now();
     session.larkAppId = larkAppId;
     session.ownerOpenId = operatorOpenId;
@@ -17006,6 +17092,15 @@ async function handleThreadReply(
       // 收紧到与 daemon 命令同档；这会同时改变真人 oncall 成员的现有行为，应单独评估。
       const ds = existingDs;
       if (ds) {
+        if (!credentialPrincipalCanDrive(ds.session, threadSenderOpenId)) {
+          await sessionReply(
+            anchor,
+            tr('daemon.credential_owner_mismatch', undefined, localeForBot(larkAppId)),
+            'text',
+            larkAppId,
+          );
+          return;
+        }
         // /fast fail-closed: on RPC-input / Riff backends the keystroke can't
         // reach Codex's executor (see fastToggleUnsupportedBackend). Reject with
         // a clear message rather than deliver a silent no-op (or spawn junk Riff
@@ -17055,13 +17150,25 @@ async function handleThreadReply(
       // handleCommand's `!ds` branch reply no_active_session instead.
       if (!existingDs && threadChatId && !isSessionlessCommandInvocation(cmd, commandContent)
         && !EXISTING_SESSION_ONLY_DAEMON_COMMANDS.has(cmd)) {
-        const session = sessionStore.createSession(threadChatId, anchor, cmdContent.substring(0, 50), ctxChatType);
+        const commandSender = await getThreadSender();
+        let credentialState: ReturnType<typeof freezeCredentialIsolation>;
+        try {
+          credentialState = freezeCredentialIsolation(getBot(larkAppId).config.credentialIsolation, commandSender);
+        } catch (error) {
+          if (!(error instanceof CredentialOwnerRequiredError)) throw error;
+          await sessionReply(anchor, tr('daemon.credential_owner_required', undefined, localeForBot(larkAppId)), 'text', larkAppId);
+          return;
+        }
+        const session = sessionStore.createSession(
+          threadChatId, anchor, cmdContent.substring(0, 50), ctxChatType, scope,
+          { ...credentialState, larkAppId },
+        );
         const now = Date.now();
         if (ctxChatType === 'p2p') {
           setDirectChatDisplayNameFromSender(
             session,
             ctxChatType,
-            await getThreadSender(),
+            commandSender,
           );
         }
         session.larkAppId = larkAppId;
@@ -17174,6 +17281,16 @@ async function handleThreadReply(
       logger.info(`[${larkAppId}] Ignoring ${scope}-scope ${anchor}; another bot already owns it`);
       return;
     }
+  }
+
+  if (ds && !credentialPrincipalCanDrive(ds.session, threadSenderOpenId)) {
+    await sessionReply(
+      anchor,
+      tr('daemon.credential_owner_mismatch', undefined, localeForBot(larkAppId)),
+      'text',
+      larkAppId,
+    );
+    return;
   }
 
   const quotaSenderOpenId = threadSenderOpenId;
@@ -17372,11 +17489,27 @@ async function handleThreadReply(
     refreshCliVersion(botCfg);
     const senderOId = data.sender?.sender_id?.open_id;
     const senderUId = data.sender?.sender_id?.union_id;
+    const autoCreateSender = await getThreadSender();
+    let credentialState: ReturnType<typeof freezeCredentialIsolation>;
+    try {
+      credentialState = freezeCredentialIsolation(botCfg.credentialIsolation, autoCreateSender);
+    } catch (error) {
+      if (!(error instanceof CredentialOwnerRequiredError)) throw error;
+      await sessionReply(anchor, tr('daemon.credential_owner_required', undefined, localeForBot(larkAppId)), 'text', larkAppId);
+      return;
+    }
     // For thread-scope: rootMessageId = anchor (real thread root).
     // For chat-scope:   rootMessageId = the message_id that triggered this auto-create
     //                   (used as audit trail; routing key is chatId).
     const rootIdForStore = scope === 'thread' ? anchor : parsed.messageId;
-    const session = sessionStore.createSession(autoCreateChatId, rootIdForStore, parsed.content.substring(0, 50), autoCreateChatType);
+    const session = sessionStore.createSession(
+      autoCreateChatId,
+      rootIdForStore,
+      parsed.content.substring(0, 50),
+      autoCreateChatType,
+      scope,
+      { ...credentialState, larkAppId },
+    );
     const now = Date.now();
     // Bot-started handoff sessions have no human owner; keeping the bot as
     // owner makes daemon-generated footers wake that bot again.
@@ -17425,7 +17558,6 @@ async function handleThreadReply(
     // sender (may await contact API budget) since every downstream branch
     // injects it either into the immediate prompt or stashes it on
     // pendingSender for the deferred spawn.
-    const autoCreateSender = await getThreadSender();
     setDirectChatDisplayNameFromSender(session, autoCreateChatType, autoCreateSender);
     const newDs: DaemonSession = {
       session,
@@ -17826,8 +17958,23 @@ async function autoCreateDocSession(sub: DocSubscription, larkAppId: string, ctx
   const title = `[Doc] ${sub.fileToken.slice(0, 8)}: ${ctx.text.slice(0, 40)}`;
 
   const now = Date.now();
+  let credentialState: Pick<Session, 'credentialPrincipal' | 'credentialIsolation' | 'sandbox'> = {};
+  if (botCfg.credentialIsolation?.enabled) {
+    const author = ctx.authorOpenId
+      ? await resolveSender(larkAppId, ctx.authorOpenId, 'user')
+      : undefined;
+    try {
+      credentialState = freezeCredentialIsolation(botCfg.credentialIsolation, author);
+    } catch {
+      logger.warn(`[doc-comment] owner identity unavailable; refusing isolated auto-create for ${sub.fileToken.slice(0, 12)}`);
+      return null;
+    }
+  }
 
-  const session = sessionStore.createSession(virtualChatId, virtualAnchor, title, 'group');
+  const session = sessionStore.createSession(
+    virtualChatId, virtualAnchor, title, 'group', 'chat',
+    { ...credentialState, larkAppId },
+  );
   session.larkAppId = larkAppId;
   session.scope = 'chat';
   session.lastMessageAt = new Date(now).toISOString();
@@ -18029,6 +18176,9 @@ async function handleDocComment(ctx: DocCommentContext): Promise<boolean> {
 
       const sender = ctx.authorOpenId ? await resolveSender(larkAppId, ctx.authorOpenId, 'user') : undefined;
       ensureCurrentRoutingGeneration(generation, 'comment:sender');
+      if (!credentialPrincipalCanDrive(ds.session, ctx.authorOpenId)) {
+        throw new Error('document commenter does not match the session credential principal');
+      }
       const authorName = sender?.name || ctx.authorOpenId?.slice(0, 8) || '?';
       const dsBotCfg = getBot(ds.larkAppId).config;
       const promptInput = {

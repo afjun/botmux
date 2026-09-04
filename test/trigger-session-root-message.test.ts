@@ -20,6 +20,16 @@ vi.mock('../src/bot-registry.js', () => ({
   effectiveDefaultWorkingDir: vi.fn(() => '/tmp'),
 }));
 
+const mockGetConnector = vi.fn();
+vi.mock('../src/services/connector-store.js', () => ({
+  getConnector: (...args: any[]) => mockGetConnector(...args),
+}));
+
+const mockResolveSender = vi.fn();
+vi.mock('../src/im/lark/identity-cache.js', () => ({
+  resolveSender: (...args: any[]) => mockResolveSender(...args),
+}));
+
 const mockIsInChat = vi.fn(async () => true);
 vi.mock('../src/services/groups-store.js', () => ({
   isInChat: (...args: any[]) => mockIsInChat(...args),
@@ -148,12 +158,16 @@ describe('triggerSessionTurn rootMessageId target', () => {
       botOpenId: 'ou_bot',
     });
     mockGetMessageChatId.mockResolvedValue(CHAT);
-    mockCreateSession.mockImplementation((chatId: string, rootMessageId: string, title: string, chatType: 'group' | 'p2p') => ({
+    mockGetConnector.mockReturnValue(undefined);
+    mockResolveSender.mockResolvedValue(undefined);
+    mockCreateSession.mockImplementation((chatId: string, rootMessageId: string, title: string, chatType: 'group' | 'p2p', scope?: 'thread' | 'chat', initial?: Record<string, unknown>) => ({
+      ...initial,
       sessionId: 'sess_new',
       chatId,
       rootMessageId,
       title,
       chatType,
+      scope,
       status: 'active',
       createdAt: '2026-06-01T00:00:00.000Z',
     }));
@@ -486,6 +500,45 @@ describe('triggerSessionTurn rootMessageId target', () => {
     expect(ds?.pendingCodexAppMessageContext).toContain('<botmux_external_event trusted="false">');
     expect(ds?.pendingCodexAppMessageContext).not.toContain('Inspect the alert.');
     expect(mockRunAutoWorktreeCommit).toHaveBeenCalledWith(expect.objectContaining({ ds }));
+  });
+
+  it('passes the verified webhook principal into auto-worktree commit', async () => {
+    mockGetBot.mockReturnValue({
+      config: {
+        larkAppId: APP,
+        cliId: 'claude-code',
+        workingDir: '/tmp',
+        credentialIsolation: { enabled: true, mounts: [] },
+      },
+      botName: 'Bot',
+      botOpenId: 'ou_bot',
+    });
+    mockGetConnector.mockReturnValue({
+      target: { botId: APP },
+      credentialOwner: { path: '$.owners', openIdPath: '$.open_id', emailPath: '$.email' },
+    });
+    mockResolveSender.mockResolvedValue({
+      openId: 'ou_owner',
+      type: 'user',
+      email: 'alice@directory.example',
+    });
+    mockBotAutoWorktreeEnabled.mockReturnValue(true);
+    const req = request();
+    req.envelope.payload = {
+      owners: [{ open_id: 'ou_owner', email: 'alice@payload.example' }],
+    };
+    const activeSessions = new Map<string, DaemonSession>();
+
+    const res = await triggerSessionTurn(req, { larkAppId: APP, activeSessions });
+
+    expect(res).toMatchObject({ ok: true, action: 'queued' });
+    const ds = activeSessions.get(sessionKey(ROOT, APP));
+    expect(ds?.session.credentialPrincipal).toEqual({ ownerId: 'alice', openId: 'ou_owner' });
+    expect(ds?.session.ownerOpenId).toBe('ou_owner');
+    expect(mockRunAutoWorktreeCommit).toHaveBeenCalledWith(expect.objectContaining({
+      ds,
+      operatorOpenId: 'ou_owner',
+    }));
   });
 
   it('passes the clean split into a new Codex App session without worktree staging', async () => {

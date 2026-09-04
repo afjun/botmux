@@ -491,6 +491,56 @@ describe('connector-api write routes', () => {
     expect(deleted.deleted).toBe(true);
   });
 
+  it('strictly normalizes, preserves, and clears credential owner extractors', async () => {
+    const created = await json(await fetch(`${baseUrl}/api/connectors`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Owner-aware webhook',
+        target: { mode: 'fixed', kind: 'turn', botId: 'app1', chatId: 'oc_1' },
+        credentialOwner: {
+          path: ' $.meego.owners ',
+          openIdPath: ' $.open_id ',
+          emailPath: ' $.email ',
+        },
+      }),
+    }));
+    expect(created.connector.credentialOwner).toEqual({
+      path: '$.meego.owners',
+      openIdPath: '$.open_id',
+      emailPath: '$.email',
+    });
+
+    const id = created.connector.id;
+    const maintained = await json(await fetch(`${baseUrl}/api/connectors/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Renamed owner-aware webhook' }),
+    }));
+    expect(maintained.connector.credentialOwner).toEqual(created.connector.credentialOwner);
+
+    const rejected = await fetch(`${baseUrl}/api/connectors/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        credentialOwner: {
+          path: '$.meego.owners[0]',
+          openIdPath: '$.open_id',
+          emailPath: '$.email',
+        },
+      }),
+    });
+    expect(rejected.status).toBe(400);
+    expect(await json(rejected)).toMatchObject({ ok: false, error: 'credential_owner_extractor_invalid' });
+
+    const cleared = await json(await fetch(`${baseUrl}/api/connectors/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ credentialOwner: null }),
+    }));
+    expect(cleared.connector.credentialOwner).toBeUndefined();
+  });
+
   it('serves trigger log filters, connector stats, and explicit prune', async () => {
     const created = await json(await fetch(`${baseUrl}/api/connectors`, {
       method: 'POST',

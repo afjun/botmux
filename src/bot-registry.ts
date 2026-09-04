@@ -25,6 +25,10 @@ import {
   normalizeSessionOwnerReminderConfig,
   type SessionOwnerReminderConfig,
 } from './core/session-owner-reminder.js';
+import {
+  normalizeCredentialIsolationConfig,
+  type CredentialIsolationConfig,
+} from './core/credential-isolation-config.js';
 import type {
   VcMeetingConsumerAgentConfig,
   VcMeetingConsumerConfig,
@@ -47,6 +51,14 @@ export class LarkTransportDisabledError extends Error {
   }
 }
 
+export type {
+  CredentialBootstrapConfig,
+  CredentialCommandConfig,
+  CredentialIsolationConfig,
+  CredentialIsolationPresetId,
+  CredentialMountConfig,
+  CredentialMountKind,
+} from './core/credential-isolation-config.js';
 export type {
   VcMeetingConsumerAgentConfig,
   VcMeetingConsumerConfig,
@@ -1144,6 +1156,10 @@ export interface BotConfig {
    * rely only on already-mounted local inputs.
    */
   sandboxNetwork?: boolean;
+  /** Per-owner credential isolation (requires sandbox: true).
+   *  Maps shared host paths to per-owner subdirectories under
+   *  ~/.botmux/owners/<ownerId>/. */
+  credentialIsolation?: CredentialIsolationConfig;
   /**
    * LEGACY read-isolation flag (pre fs-policy). The unified sandbox is
    * deny-by-default, so cross-bot read isolation is inherent — this flag is
@@ -2573,6 +2589,10 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       sandboxHidePaths: normalizeStringList(entry.sandboxHidePaths),
       sandboxReadonlyPaths: normalizeStringList(entry.sandboxReadonlyPaths),
       sandboxNetwork: typeof entry.sandboxNetwork === 'boolean' ? entry.sandboxNetwork : undefined,
+      credentialIsolation: normalizeCredentialIsolationConfig(entry.credentialIsolation, {
+        workingDirs,
+        configPath: `Bot config [${i}].credentialIsolation`,
+      }),
       readIsolation: entry.readIsolation === true,
       readDenyExtraPaths: normalizeStringList(entry.readDenyExtraPaths),
       backendType: entry.backendType,
