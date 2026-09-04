@@ -3,6 +3,8 @@ import { existsSync, lstatSync, mkdirSync, openSync, closeSync } from 'node:fs';
 import { cloneCredentialMount, type CredentialIsolationConfig, type CredentialMountConfig } from './credential-isolation-config.js';
 import type { CredentialBootstrapRunnerSpec } from './credential-bootstrap-runner.js';
 import type { Session } from '../types.js';
+import { logger } from '../utils/logger.js';
+import { formatCredentialTrace } from './credential-isolation-log.js';
 
 export class CredentialOwnerRequiredError extends Error {
   readonly code = 'credential_owner_required';
@@ -48,7 +50,22 @@ export function freezeCredentialIsolation(
   if (!config?.enabled) return {};
   const openId = identity?.openId?.trim();
   const ownerId = ownerFromEmail(identity?.email);
-  if (!openId || !ownerId) throw new CredentialOwnerRequiredError();
+  if (!openId || !ownerId) {
+    logger.warn(formatCredentialTrace('policy.freeze_failed', {
+      openId,
+      result: 'rejected',
+      reason: !openId ? 'open_id_missing' : 'email_prefix_missing_or_invalid',
+      count: config.mounts.length,
+    }));
+    throw new CredentialOwnerRequiredError();
+  }
+  logger.info(formatCredentialTrace('policy.freeze_ready', {
+    ownerId,
+    openId,
+    result: 'frozen',
+    count: config.mounts.length,
+    sandbox: true,
+  }));
   return {
     credentialPrincipal: { openId, ownerId },
     credentialIsolation: { version: 1, mounts: config.mounts.map(cloneCredentialMount) },

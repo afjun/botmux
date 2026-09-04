@@ -22,6 +22,8 @@ import { getConnector } from '../services/connector-store.js';
 import { extractCredentialOwnerCandidates } from '../services/credential-owner-extractor.js';
 import { resolveSender, type ResolvedSender } from '../im/lark/identity-cache.js';
 import { freezeCredentialIsolation, ownerFromEmail } from './owner.js';
+import { formatCredentialTrace } from './credential-isolation-log.js';
+import { logger } from '../utils/logger.js';
 
 export interface TriggerSessionDeps {
   larkAppId: string;
@@ -214,14 +216,80 @@ async function resolveWebhookCredentialOwner(
 ): Promise<ResolvedSender | undefined> {
   if (req.source.type !== 'webhook' || !req.source.connectorId) return undefined;
   const connector = getConnector(req.source.connectorId);
-  if (!connector || connector.target.botId !== larkAppId) return undefined;
+  if (!connector || connector.target.botId !== larkAppId) {
+    logger.warn(formatCredentialTrace('webhook_owner.connector_rejected', {
+      botId: larkAppId,
+      connectorId: req.source.connectorId,
+      result: 'rejected',
+      reason: !connector ? 'connector_not_found' : 'target_bot_mismatch',
+    }));
+    return undefined;
+  }
   const candidates = extractCredentialOwnerCandidates(req.envelope.payload, connector.credentialOwner);
-  for (const candidate of candidates) {
-    const sender = await resolveSender(larkAppId, candidate.openId, 'user');
-    if (!sender?.email) continue;
-    if (candidate.email && ownerFromEmail(candidate.email) !== ownerFromEmail(sender.email)) continue;
+  logger.info(formatCredentialTrace('webhook_owner.candidates_extracted', {
+    botId: larkAppId,
+    connectorId: req.source.connectorId,
+    result: candidates.length > 0 ? 'ready' : 'empty',
+    count: candidates.length,
+  }));
+  for (let index = 0; index < candidates.length; index++) {
+    const candidate = candidates[index];
+    let sender: ResolvedSender | undefined;
+    try {
+      sender = await resolveSender(larkAppId, candidate.openId, 'user');
+    } catch (error) {
+      logger.warn(formatCredentialTrace('webhook_owner.lookup_failed', {
+        botId: larkAppId,
+        connectorId: req.source.connectorId,
+        openId: candidate.openId,
+        result: 'error',
+        reason: error instanceof Error ? error.message : String(error),
+        attempt: index + 1,
+      }));
+      throw error;
+    }
+    if (!sender?.email) {
+      logger.info(formatCredentialTrace('webhook_owner.candidate_rejected', {
+        botId: larkAppId,
+        connectorId: req.source.connectorId,
+        openId: candidate.openId,
+        result: 'rejected',
+        reason: sender ? 'contact_email_missing' : 'contact_not_resolved',
+        attempt: index + 1,
+      }));
+      continue;
+    }
+    const payloadOwnerId = ownerFromEmail(candidate.email);
+    const contactOwnerId = ownerFromEmail(sender.email);
+    if (!payloadOwnerId || payloadOwnerId !== contactOwnerId) {
+      logger.info(formatCredentialTrace('webhook_owner.candidate_rejected', {
+        botId: larkAppId,
+        connectorId: req.source.connectorId,
+        ownerId: payloadOwnerId,
+        openId: candidate.openId,
+        result: 'rejected',
+        reason: 'email_prefix_mismatch',
+        attempt: index + 1,
+      }));
+      continue;
+    }
+    logger.info(formatCredentialTrace('webhook_owner.resolved', {
+      botId: larkAppId,
+      connectorId: req.source.connectorId,
+      ownerId: contactOwnerId,
+      openId: sender.openId,
+      result: 'accepted',
+      attempt: index + 1,
+    }));
     return sender;
   }
+  logger.warn(formatCredentialTrace('webhook_owner.unresolved', {
+    botId: larkAppId,
+    connectorId: req.source.connectorId,
+    result: 'rejected',
+    reason: candidates.length ? 'no_verified_candidate' : 'no_valid_candidate',
+    count: candidates.length,
+  }));
   return undefined;
 }
 
@@ -495,6 +563,14 @@ export async function triggerSessionTurn(
   if ((!ds && bot.config.credentialIsolation?.enabled) || ds?.session.credentialIsolation) {
     const credentialOwner = await resolveWebhookCredentialOwner(req, larkAppId);
     if (!credentialOwner) {
+      logger.warn(formatCredentialTrace('session.owner_required', {
+        sessionId: ds?.session.sessionId,
+        botId: larkAppId,
+        connectorId: req.source.connectorId,
+        source: 'webhook',
+        result: 'rejected',
+        reason: 'verified_owner_unavailable',
+      }));
       return {
         ok: false,
         triggerId,
@@ -504,6 +580,16 @@ export async function triggerSessionTurn(
     }
     if (ds?.session.credentialPrincipal
       && ds.session.credentialPrincipal.openId !== credentialOwner.openId) {
+      logger.warn(formatCredentialTrace('session.principal_mismatch', {
+        sessionId: ds.session.sessionId,
+        botId: larkAppId,
+        connectorId: req.source.connectorId,
+        ownerId: ds.session.credentialPrincipal.ownerId,
+        openId: credentialOwner.openId,
+        source: 'webhook',
+        result: 'rejected',
+        reason: 'open_id_mismatch',
+      }));
       return {
         ok: false,
         triggerId,
@@ -511,7 +597,29 @@ export async function triggerSessionTurn(
         error: 'webhook owner does not match the existing session credential owner',
       };
     }
-    if (!ds) newSessionCredentialState = freezeCredentialIsolation(bot.config.credentialIsolation, credentialOwner);
+    if (!ds) {
+      newSessionCredentialState = freezeCredentialIsolation(bot.config.credentialIsolation, credentialOwner);
+      logger.info(formatCredentialTrace('session.policy_frozen', {
+        botId: larkAppId,
+        connectorId: req.source.connectorId,
+        ownerId: newSessionCredentialState.credentialPrincipal?.ownerId,
+        openId: newSessionCredentialState.credentialPrincipal?.openId,
+        source: 'webhook',
+        result: 'frozen',
+        count: newSessionCredentialState.credentialIsolation?.mounts.length,
+        sandbox: newSessionCredentialState.sandbox,
+      }));
+    } else {
+      logger.info(formatCredentialTrace('session.principal_verified', {
+        sessionId: ds.session.sessionId,
+        botId: larkAppId,
+        connectorId: req.source.connectorId,
+        ownerId: ds.session.credentialPrincipal?.ownerId,
+        openId: credentialOwner.openId,
+        source: 'webhook',
+        result: 'accepted',
+      }));
+    }
   }
 
   if (dryRun) {

@@ -11,6 +11,7 @@ import {
   type CliRuntimeConfig,
 } from './adapters/cli/runtime.js';
 import { logger } from './utils/logger.js';
+import { formatCredentialTrace } from './core/credential-isolation-log.js';
 import { isLocale, setBotLookup, type Locale } from './i18n/index.js';
 import type { VoiceConfig } from './services/voice/types.js';
 import { type Brand, sdkDomain, normalizeBrand } from './im/lark/lark-hosts.js';
@@ -2528,6 +2529,18 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
     const contentTriggers = normalizeContentTriggers(entry.contentTriggers, i);
     const messageListeners = normalizeMessageListeners(entry.messageListeners, i);
     const vcMeetingAgent = normalizeVcMeetingAgentConfig(entry.vcMeetingAgent);
+    const credentialIsolation = normalizeCredentialIsolationConfig(entry.credentialIsolation, {
+      workingDirs,
+      configPath: `Bot config [${i}].credentialIsolation`,
+    });
+    if (credentialIsolation) {
+      logger.info(formatCredentialTrace('config.loaded', {
+        botId: entry.larkAppId,
+        result: credentialIsolation.enabled ? 'enabled' : 'disabled',
+        count: credentialIsolation.mounts.length,
+        sandbox: credentialIsolation.enabled || entry.sandbox === true,
+      }));
+    }
 
     // voice：per-bot 语音引擎覆盖。结构化保留（engine ∈ sami|openai，sami/openai
     // 为对象，speaker/rate 透传）；非对象或 engine 非法 → undefined。深度校验
@@ -2589,10 +2602,7 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       sandboxHidePaths: normalizeStringList(entry.sandboxHidePaths),
       sandboxReadonlyPaths: normalizeStringList(entry.sandboxReadonlyPaths),
       sandboxNetwork: typeof entry.sandboxNetwork === 'boolean' ? entry.sandboxNetwork : undefined,
-      credentialIsolation: normalizeCredentialIsolationConfig(entry.credentialIsolation, {
-        workingDirs,
-        configPath: `Bot config [${i}].credentialIsolation`,
-      }),
+      credentialIsolation,
       readIsolation: entry.readIsolation === true,
       readDenyExtraPaths: normalizeStringList(entry.readDenyExtraPaths),
       backendType: entry.backendType,

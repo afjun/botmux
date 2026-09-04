@@ -52,6 +52,35 @@ Webhook Connector 需要声明 owner 提取规则，例如 Meego payload：
 
 候选人按 payload 顺序处理。目标 bot 会用通讯录 API 重新校验 Open ID 对应邮箱，只有邮箱前缀与 payload 一致的第一个候选人能成为 owner；机器人需具备用户基础信息和邮箱读取权限。飞书 Open ID 是应用维度的，因此 payload 必须携带目标 bot 能查询的 Open ID；来自其他应用且不可解析的 Open ID 会 fail-closed。
 
+### 链路日志
+
+Owner 凭证隔离统一使用 `[owner-credential]` 前缀，并通过 `event`、短
+`session`、`bot`、`connector`、`owner`、`mount`、`backend` 和 `result`
+串联整条链路。Open ID 仅记录头尾，邮箱全文、登录 URL、设备码和 token
+不会写入诊断日志；异常原因还会再次做 URL/Bearer/token 脱敏。
+
+```bash
+pnpm daemon:logs | rg '\[owner-credential\]'
+pnpm daemon:logs | rg 'session=12345678|owner=alice'
+```
+
+常见事件顺序：
+
+```text
+config.loaded
+webhook_owner.candidates_extracted → webhook_owner.resolved
+policy.freeze_ready → session.policy_frozen → session.created
+worker.snapshot_received → worker.validation_passed
+mount.plan_ready → mount.resolved → mount.sources_ready
+bootstrap.plan_ready → bootstrap.required/bootstrap.skipped → bootstrap.command_started
+sandbox.policy_compiled → sandbox.prepared → sandbox.process_started
+bootstrap.validation_finished → bootstrap.batch_completed
+```
+
+拒绝或失败时重点查找 `result=rejected|failed|error`，并查看 `reason`。非 owner
+驱动消息或卡片会记录 `authorization.denied`；首次登录失败并以 78 退出会记录
+`bootstrap.worker_exit`，且仍要求用户显式执行 `/restart`。
+
 ## 工作原理
 
 ```

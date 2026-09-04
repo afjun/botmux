@@ -27,6 +27,7 @@ import {
   credentialPrincipalCanDrive,
   freezeCredentialIsolation,
 } from './core/owner.js';
+import { formatCredentialTrace } from './core/credential-isolation-log.js';
 import {
   evaluateOverload,
   formatOverloadAlert,
@@ -4573,6 +4574,15 @@ async function adoptCodexNotifierEvent(
     }
   }
   if (!credentialPrincipalCanDrive(ds.session, ownerOpenId)) {
+    logger.warn(formatCredentialTrace('authorization.denied', {
+      sessionId: ds.session.sessionId,
+      botId: ds.larkAppId,
+      ownerId: ds.session.credentialPrincipal?.ownerId,
+      openId: ownerOpenId,
+      source: 'codex_notifier_adopt',
+      result: 'rejected',
+      reason: 'open_id_mismatch',
+    }));
     throw new Error('通知操作者与会话 credential principal 不一致');
   }
 
@@ -17093,6 +17103,15 @@ async function handleThreadReply(
       const ds = existingDs;
       if (ds) {
         if (!credentialPrincipalCanDrive(ds.session, threadSenderOpenId)) {
+          logger.info(formatCredentialTrace('authorization.denied', {
+            sessionId: ds.session.sessionId,
+            botId: ds.larkAppId,
+            ownerId: ds.session.credentialPrincipal?.ownerId,
+            openId: threadSenderOpenId,
+            source: 'cli_passthrough',
+            result: 'rejected',
+            reason: threadSenderOpenId ? 'open_id_mismatch' : 'sender_open_id_missing',
+          }));
           await sessionReply(
             anchor,
             tr('daemon.credential_owner_mismatch', undefined, localeForBot(larkAppId)),
@@ -17284,6 +17303,15 @@ async function handleThreadReply(
   }
 
   if (ds && !credentialPrincipalCanDrive(ds.session, threadSenderOpenId)) {
+    logger.info(formatCredentialTrace('authorization.denied', {
+      sessionId: ds.session.sessionId,
+      botId: ds.larkAppId,
+      ownerId: ds.session.credentialPrincipal?.ownerId,
+      openId: threadSenderOpenId,
+      source: 'message_turn',
+      result: 'rejected',
+      reason: threadSenderOpenId ? 'open_id_mismatch' : 'sender_open_id_missing',
+    }));
     await sessionReply(
       anchor,
       tr('daemon.credential_owner_mismatch', undefined, localeForBot(larkAppId)),
@@ -18177,6 +18205,15 @@ async function handleDocComment(ctx: DocCommentContext): Promise<boolean> {
       const sender = ctx.authorOpenId ? await resolveSender(larkAppId, ctx.authorOpenId, 'user') : undefined;
       ensureCurrentRoutingGeneration(generation, 'comment:sender');
       if (!credentialPrincipalCanDrive(ds.session, ctx.authorOpenId)) {
+        logger.warn(formatCredentialTrace('authorization.denied', {
+          sessionId: ds.session.sessionId,
+          botId: ds.larkAppId,
+          ownerId: ds.session.credentialPrincipal?.ownerId,
+          openId: ctx.authorOpenId,
+          source: 'document_comment',
+          result: 'rejected',
+          reason: ctx.authorOpenId ? 'open_id_mismatch' : 'commenter_open_id_missing',
+        }));
         throw new Error('document commenter does not match the session credential principal');
       }
       const authorName = sender?.name || ctx.authorOpenId?.slice(0, 8) || '?';

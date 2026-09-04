@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { TriggerRequest } from '../src/services/trigger-types.js';
 import type { DaemonSession } from '../src/core/types.js';
+import { logger } from '../src/utils/logger.js';
 
 const mockGetMessageChatId = vi.fn();
 const mockGetChatMode = vi.fn(async () => 'topic');
@@ -503,6 +504,7 @@ describe('triggerSessionTurn rootMessageId target', () => {
   });
 
   it('passes the verified webhook principal into auto-worktree commit', async () => {
+    const infoSpy = vi.spyOn(logger, 'info');
     mockGetBot.mockReturnValue({
       config: {
         larkAppId: APP,
@@ -539,6 +541,13 @@ describe('triggerSessionTurn rootMessageId target', () => {
       ds,
       operatorOpenId: 'ou_owner',
     }));
+    const trace = infoSpy.mock.calls.map(call => String(call[0])).join('\n');
+    expect(trace).toContain('[owner-credential] event=webhook_owner.candidates_extracted');
+    expect(trace).toContain('[owner-credential] event=webhook_owner.resolved');
+    expect(trace).toContain('[owner-credential] event=session.policy_frozen');
+    expect(trace).not.toContain('alice@directory.example');
+    expect(trace).not.toContain('alice@payload.example');
+    infoSpy.mockRestore();
   });
 
   it('passes the clean split into a new Codex App session without worktree staging', async () => {

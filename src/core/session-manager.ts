@@ -12,6 +12,7 @@ import * as sessionStore from '../services/session-store.js';
 import * as messageQueue from '../services/message-queue.js';
 import { downloadMessageResource, listChatBotMembers, UserTokenMissingError } from '../im/lark/client.js';
 import { logger } from '../utils/logger.js';
+import { formatCredentialTrace } from './credential-isolation-log.js';
 import { forkWorker, sendWorkerInput, forkAdoptWorker, adoptSandboxBlocked, killStalePids, sweepDeadPidMarkers, getCurrentCliVersion, restoreUsageLimitRuntimeState, setActiveSessionIfActive, setActiveSessionSafe, isDisposableCommandScratch, isRelayableRealSession, closeSession, getActiveSessionsRegistry, suspendWorker, isSessionTransferring, deferUntilSessionTransferSettled } from './worker-pool.js';
 import { createCliAdapterSync } from '../adapters/cli/registry.js';
 import { buildBotmuxShellHints } from '../adapters/cli/shared-hints.js';
@@ -1688,6 +1689,20 @@ export async function restoreActiveSessions(activeSessions: Map<string, DaemonSe
     }
     restoredByThisInvocation.push(ds);
     announceSessionRow(ds);
+    if (session.credentialPrincipal || session.credentialIsolation) {
+      logger.info(formatCredentialTrace('session.restored', {
+        sessionId: session.sessionId,
+        botId: ds.larkAppId,
+        ownerId: session.credentialPrincipal?.ownerId,
+        openId: session.credentialPrincipal?.openId,
+        backend: session.backendType,
+        source: 'daemon_restore',
+        scope,
+        result: session.credentialPrincipal && session.credentialIsolation ? 'restored' : 'incomplete',
+        count: session.credentialIsolation?.mounts.length,
+        sandbox: session.sandbox,
+      }));
+    }
 
     if (session.initialUserTurnPending) {
       // `hasHistory: true` above means "there may be a CLI process/transcript to
@@ -2486,6 +2501,21 @@ export async function executeScheduledTask(
   }
 
   logger.info(`[scheduler] Task "${task.name}" spawned (session: ${session.sessionId}, scope: ${runtimeScope}, anchor: ${anchor}, continuation: ${isContinuation}${silent ? ', silent' : ''})`);
+  if (session.credentialPrincipal) {
+    logger.info(formatCredentialTrace('session.scheduled_spawned', {
+      sessionId: session.sessionId,
+      botId: larkAppId,
+      taskId: task.id,
+      ownerId: session.credentialPrincipal.ownerId,
+      openId: session.credentialPrincipal.openId,
+      backend: session.backendType,
+      source: 'schedule',
+      scope: runtimeScope,
+      result: 'spawned',
+      count: session.credentialIsolation?.mounts.length,
+      sandbox: session.sandbox,
+    }));
+  }
 }
 
 // ─── Dashboard「创建会话」spawn / activate ───────────────────────────────────

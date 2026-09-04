@@ -22,6 +22,7 @@ import { withFileLockSync } from '../utils/file-lock.js';
 import { fsyncDirectorySyncPortable } from '../utils/fs-durability.js';
 import { botHomePath } from '../adapters/cli/read-isolation.js';
 import type { ScheduledTask, ParsedSchedule, ScheduleExecutionPosition } from '../types.js';
+import { formatCredentialTrace } from '../core/credential-isolation-log.js';
 
 // ─── Idempotency types (events doc v0.1.2 §2.2) ─────────────────────────────
 
@@ -551,6 +552,18 @@ export function createTask(params: {
       silent: params.silent === true ? true : undefined,
     };
     working.set(task.id, task);
+    if (task.credentialPrincipal || task.credentialIsolation) {
+      logger.info(formatCredentialTrace('schedule.policy_frozen', {
+        taskId: task.id,
+        botId: task.larkAppId,
+        ownerId: task.credentialPrincipal?.ownerId,
+        openId: task.credentialPrincipal?.openId,
+        source: 'schedule_create',
+        result: task.credentialPrincipal && task.credentialIsolation ? 'frozen' : 'incomplete',
+        count: task.credentialIsolation?.mounts.length,
+        sandbox: task.sandbox,
+      }));
+    }
     return { result: task, changed: true };
   }, params.larkAppId);
 }

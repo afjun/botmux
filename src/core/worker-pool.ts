@@ -67,6 +67,7 @@ import {
 import { isSuspendableBackendType, getSessionPersistentBackendType, persistentBackendTargetForSession, persistentSessionName, killPersistentBackendTarget, killPersistentSession, probePersistentBackendTarget, resolvePairedSpawnBackendType, resolvePersistentBackendTarget } from './persistent-backend.js';
 import { getBot, getAllBots, loadBotConfigs, resolveBrandLabel, getLoadedConfigPath, resolveUsageDisplay } from '../bot-registry.js';
 import { RestartCoordinator, type RestartObserver } from './restart-coordinator.js';
+import { formatCredentialTrace } from './credential-isolation-log.js';
 import { runtimeBuildIdentity } from '../utils/runtime-build-id.js';
 
 /** A random id minted once per daemon process (this lifetime). Stamped onto
@@ -5616,10 +5617,32 @@ function setupWorkerHandlers(
       }
 
       case 'credential_bootstrap_qr': {
-        if (managedAuxUiSuppressed(msg.turnId, msg.dispatchAttempt)) break;
+        if (managedAuxUiSuppressed(msg.turnId, msg.dispatchAttempt)) {
+          logger.info(formatCredentialTrace('bootstrap.qr_delivery_skipped', {
+            sessionId: ds.session.sessionId,
+            botId: ds.larkAppId,
+            ownerId: ds.session.credentialPrincipal?.ownerId,
+            result: 'skipped',
+            reason: 'managed_aux_ui_suppressed',
+          }));
+          break;
+        }
         try {
           await scopedReply(JSON.stringify({ image_key: msg.imageKey }), 'image', msg.turnId);
+          logger.info(formatCredentialTrace('bootstrap.qr_delivered', {
+            sessionId: ds.session.sessionId,
+            botId: ds.larkAppId,
+            ownerId: ds.session.credentialPrincipal?.ownerId,
+            result: 'delivered',
+          }));
         } catch (err: any) {
+          logger.error(formatCredentialTrace('bootstrap.qr_delivery_failed', {
+            sessionId: ds.session.sessionId,
+            botId: ds.larkAppId,
+            ownerId: ds.session.credentialPrincipal?.ownerId,
+            result: 'error',
+            reason: err.message,
+          }));
           logger.error(`[${t}] Failed to deliver credential bootstrap QR to Lark: ${err.message}`);
         }
         break;
@@ -6013,6 +6036,15 @@ function setupWorkerHandlers(
         // launch an interactive auth flow and can spam links/device codes.
         // Preserve the session, but require an explicit /restart retry.
         if (msg.code === 78 && ds.session.credentialIsolation) {
+          logger.warn(formatCredentialTrace('bootstrap.worker_exit', {
+            sessionId: ds.session.sessionId,
+            botId: ds.larkAppId,
+            ownerId: ds.session.credentialPrincipal?.ownerId,
+            openId: ds.session.credentialPrincipal?.openId,
+            backend: ds.session.backendType,
+            result: 'failed',
+            reason: 'runner_exit_78',
+          }));
           logger.warn(`[${t}] Credential bootstrap failed; waiting for explicit /restart`);
           restartCounts.delete(ds.session.sessionId);
           killWorker(ds);

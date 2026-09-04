@@ -6,6 +6,7 @@ import { logger } from '../utils/logger.js';
 import { cleanupMaterializedDashboardImages } from '../core/dashboard-images.js';
 import { deleteFrozenCards } from './frozen-card-store.js';
 import type { Session } from '../types.js';
+import { formatCredentialTrace } from '../core/credential-isolation-log.js';
 
 let sessions: Map<string, Session> = new Map();
 let loaded = false;
@@ -185,6 +186,18 @@ export function createSession(
   sessions.set(session.sessionId, session);
   save();
   logger.info(`Created session ${session.sessionId} (thread: ${rootMessageId})`);
+  if (session.credentialPrincipal || session.credentialIsolation) {
+    logger.info(formatCredentialTrace('session.created', {
+      sessionId: session.sessionId,
+      botId: session.larkAppId,
+      ownerId: session.credentialPrincipal?.ownerId,
+      openId: session.credentialPrincipal?.openId,
+      scope: session.scope,
+      result: session.credentialPrincipal && session.credentialIsolation ? 'frozen' : 'incomplete',
+      count: session.credentialIsolation?.mounts.length,
+      sandbox: session.sandbox,
+    }));
+  }
   return session;
 }
 

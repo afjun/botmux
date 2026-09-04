@@ -2,6 +2,8 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { config } from '../config.js';
+import { logger } from '../utils/logger.js';
+import { formatCredentialTrace } from '../core/credential-isolation-log.js';
 
 export type ConnectorVerifyType = 'hmac-sha256' | 'token';
 export type ConnectorTargetMode = 'dynamic' | 'fixed' | 'new-group';
@@ -175,6 +177,14 @@ export function upsertConnector(
   if (idx >= 0) store.connectors[idx] = next;
   else store.connectors.push(next);
   writeConnectorStore(dataDir, store);
+  if (next.credentialOwner || prior?.credentialOwner) {
+    logger.info(formatCredentialTrace('connector.owner_extractor_saved', {
+      botId: next.target.botId,
+      connectorId: next.id,
+      source: idx >= 0 ? 'connector_update' : 'connector_create',
+      result: next.credentialOwner ? 'configured' : 'cleared',
+    }));
+  }
   return next;
 }
 

@@ -7,6 +7,7 @@ import { execSync } from 'node:child_process';
 import { basename as pathBasename, dirname, join } from 'node:path';
 import { config } from '../../config.js';
 import { credentialPrincipalCanDrive } from '../../core/owner.js';
+import { formatCredentialTrace } from '../../core/credential-isolation-log.js';
 import { getBot, getAllBots, getOwnerOpenId } from '../../bot-registry.js';
 import { canOperate, canTalk } from './event-dispatcher.js';
 import { updateMessage, deleteMessage, replyMessage, sendMessage, sendUserMessage, sendEphemeralCard, getMessageDetail, isHumanOpenId, resolveUserUnionId as defaultResolveUserUnionId } from './client.js';
@@ -91,7 +92,7 @@ import { publishAttentionPatch, publishClosedSessionPatch, announcePendingRepoSe
 import { fallbackTurnId } from '../../core/reply-target.js';
 import { sendWorkerIpc } from '../../core/worker-ipc.js';
 import { validateWorkingDir } from '../../core/working-dir.js';
-import type { DaemonToWorker, DisplayMode, TermActionKey } from '../../types.js';
+import type { DaemonToWorker, DisplayMode, Session, TermActionKey } from '../../types.js';
 import { sessionKey, sessionAnchorId, frozenDisplayMode, markRepoCardConsumed, isRepoCardConsumed, isActiveRepoCard, claimCurrentRepoCard } from '../../core/types.js';
 import type { DaemonSession } from '../../core/types.js';
 import { buildTerminalUrl } from '../../core/terminal-url.js';
@@ -236,6 +237,22 @@ export async function resolveCardOperatorUnionId(
 
 function tag(ds: DaemonSession): string {
   return ds.session.sessionId.substring(0, 8);
+}
+
+function logCredentialActionDenied(
+  session: Pick<Session, 'sessionId' | 'larkAppId' | 'credentialPrincipal'>,
+  operatorOpenId: string | undefined,
+  source: string,
+): void {
+  logger.info(formatCredentialTrace('authorization.denied', {
+    sessionId: session.sessionId,
+    botId: session.larkAppId,
+    ownerId: session.credentialPrincipal?.ownerId,
+    openId: operatorOpenId,
+    source,
+    result: 'rejected',
+    reason: operatorOpenId ? 'open_id_mismatch' : 'operator_open_id_missing',
+  }));
 }
 
 const LEGACY_SELF_HEAL_ACTIONS = new Set(['toggle_display', 'toggle_stream', 'refresh_screenshot']);
@@ -431,6 +448,7 @@ export async function commitRepoSelection(
 ): Promise<void> {
   const { ds, rootId, cardMessageId, larkAppId, operatorOpenId, activeSessions, sessionReply } = ctx;
   if (!credentialPrincipalCanDrive(ds.session, operatorOpenId)) {
+    logCredentialActionDenied(ds.session, operatorOpenId, 'repo_selection');
     logger.info(`[${tag(ds)}] Repo selection blocked for non-principal credential owner: ${operatorOpenId ?? '?'}`);
     return;
   }
@@ -1715,6 +1733,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       : undefined;
     const credentialSession = ds?.session ?? closedForCtx;
     if (credentialSession && !credentialPrincipalCanDrive(credentialSession, operatorOpenId)) {
+      logCredentialActionDenied(credentialSession, operatorOpenId, `card:${value.action ?? 'unknown'}`);
       logger.info(`Card action "${value.action}" blocked for non-principal credential owner: ${operatorOpenId}`);
       return { toast: { type: 'warning', content: t('daemon.credential_owner_mismatch', undefined, localeForBot(larkAppId)) } };
     }
@@ -2071,6 +2090,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
         return { toast: { type: 'warning', content: t('card.voice.toast_session_gone', undefined, locDs) } };
       }
       if (!credentialPrincipalCanDrive(ds.session, operatorOpenId)) {
+        logCredentialActionDenied(ds.session, operatorOpenId, 'card:voice_summary');
         return { toast: { type: 'warning', content: t('daemon.credential_owner_mismatch', undefined, locDs) } };
       }
       // 权限：仅 canTalk / canOperate 用户可点；其他人提示需授权（无声门会让人以为按钮坏了）。
@@ -3066,6 +3086,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
     const ds = activeSessions.get(sKey);
     if (!ds) return;
     if (!credentialPrincipalCanDrive(ds.session, operatorOpenId)) {
+      logCredentialActionDenied(ds.session, operatorOpenId, 'card:codex_app_thread_select');
       return { toast: { type: 'warning', content: t('daemon.credential_owner_mismatch', undefined, localeForBot(ds.larkAppId)) } };
     }
     const sourceSession = ds.session;

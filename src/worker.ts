@@ -81,6 +81,7 @@ import {
   resolveCredentialBindMounts,
   resolvePendingCredentialBootstraps,
 } from './core/owner.js';
+import { formatCredentialTrace } from './core/credential-isolation-log.js';
 import {
   evaluateVcMeetingManagedSend,
 } from './services/vc-meeting-send-policy.js';
@@ -1844,6 +1845,7 @@ let durableTurnInFlight = false;
 let credentialBootstrapActive = false;
 let credentialBootstrapTail = '';
 const notifiedCredentialBootstrapValues = new Set<string>();
+const loggedCredentialBootstrapTraceLines = new Set<string>();
 let credentialBootstrapQrTimer: ReturnType<typeof setTimeout> | null = null;
 let lastCredentialBootstrapQrHash = '';
 function publishSandboxRelayCapability(opts: { failClosed?: boolean } = {}): boolean {
@@ -4966,8 +4968,19 @@ async function captureAndUpload(): Promise<void> {
  * display mode. Bootstrap runs before the first business prompt, when the
  * ordinary screenshot loop is intentionally dormant. */
 async function captureAndUploadCredentialBootstrapQr(): Promise<void> {
-  if (!credentialBootstrapActive || apiOnlyForUpload) return;
-  if (!larkAppIdForUpload || !larkAppSecretForUpload) return;
+  if (!credentialBootstrapActive || apiOnlyForUpload) {
+    log(formatCredentialTrace('bootstrap.qr_capture_skipped', {
+      sessionId, botId: larkAppIdForUpload, result: 'skipped',
+      reason: !credentialBootstrapActive ? 'bootstrap_not_active' : 'lark_transport_disabled',
+    }));
+    return;
+  }
+  if (!larkAppIdForUpload || !larkAppSecretForUpload) {
+    log(formatCredentialTrace('bootstrap.qr_capture_skipped', {
+      sessionId, botId: larkAppIdForUpload, result: 'skipped', reason: 'lark_credentials_missing',
+    }));
+    return;
+  }
 
   let png: Buffer;
   let hash: string;
@@ -4977,7 +4990,12 @@ async function captureAndUploadCredentialBootstrapQr(): Promise<void> {
       hash = createHash('md5').update(pipeResult.ansi).digest('hex');
       png = pipeResult.png;
     } else {
-      if (!renderer) return;
+      if (!renderer) {
+        log(formatCredentialTrace('bootstrap.qr_capture_skipped', {
+          sessionId, botId: larkAppIdForUpload, result: 'skipped', reason: 'terminal_renderer_missing',
+        }));
+        return;
+      }
       const term = renderer.xterm;
       const snap = renderer.rawSnapshot();
       hash = createHash('md5').update(snap).digest('hex');
@@ -4987,9 +5005,17 @@ async function captureAndUploadCredentialBootstrapQr(): Promise<void> {
         startY: term.buffer.active.baseY,
       });
     }
-    if (hash === lastCredentialBootstrapQrHash) return;
+    if (hash === lastCredentialBootstrapQrHash) {
+      log(formatCredentialTrace('bootstrap.qr_capture_skipped', {
+        sessionId, botId: larkAppIdForUpload, result: 'skipped', reason: 'duplicate_frame',
+      }));
+      return;
+    }
     lastCredentialBootstrapQrHash = hash;
   } catch (err: any) {
+    log(formatCredentialTrace('bootstrap.qr_capture_failed', {
+      sessionId, botId: larkAppIdForUpload, result: 'error', reason: err?.message ?? String(err),
+    }));
     logError(`Credential bootstrap QR render failed: ${err?.message ?? err}`);
     return;
   }
@@ -5007,7 +5033,13 @@ async function captureAndUploadCredentialBootstrapQr(): Promise<void> {
       turnId: currentBotmuxTurnId,
       dispatchAttempt: currentBotmuxDispatchAttempt,
     });
+    log(formatCredentialTrace('bootstrap.qr_uploaded', {
+      sessionId, botId: larkAppIdForUpload, result: 'sent_to_daemon',
+    }));
   } catch (err: any) {
+    log(formatCredentialTrace('bootstrap.qr_upload_failed', {
+      sessionId, botId: larkAppIdForUpload, result: 'error', reason: err?.message ?? String(err),
+    }));
     logError(`Credential bootstrap QR upload failed: ${err?.message ?? err}`);
   }
 }
@@ -5018,6 +5050,9 @@ function scheduleCredentialBootstrapQrCapture(): void {
     credentialBootstrapQrTimer = null;
     void captureAndUploadCredentialBootstrapQr();
   }, 700);
+  log(formatCredentialTrace('bootstrap.qr_capture_scheduled', {
+    sessionId, botId: larkAppIdForUpload, result: 'scheduled',
+  }));
 }
 
 function applyDisplayMode(mode: DisplayMode): void {
@@ -6096,9 +6131,21 @@ function cancelAmbiguousSubmissionAfterFailure(
 function maybeNotifyCredentialBootstrapOutput(data: string): void {
   const plain = stripAnsiForLog(data);
   credentialBootstrapTail = tailChars(credentialBootstrapTail + plain, 4_096);
+  const traceLines = credentialBootstrapTail.split(/\r?\n/);
+  if (!credentialBootstrapTail.endsWith('\n')) traceLines.pop();
+  for (const line of traceLines) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('[owner-credential] event=bootstrap.')) continue;
+    if (loggedCredentialBootstrapTraceLines.has(trimmed)) continue;
+    loggedCredentialBootstrapTraceLines.add(trimmed);
+    log(trimmed);
+  }
   if (credentialBootstrapTail.includes('[botmux] 正在初始化')) {
     if (!credentialBootstrapActive) {
       credentialBootstrapActive = true;
+      log(formatCredentialTrace('bootstrap.interactive_started', {
+        sessionId, botId: larkAppIdForUpload, result: 'waiting_for_login',
+      }));
       send({
         type: 'user_notify',
         message: '🔐 正在自动初始化 owner 专属凭证。登录链接或设备码会直接发到本话题；如工具仅显示二维码，请打开当前会话的网页终端扫码。',
@@ -6121,6 +6168,11 @@ function maybeNotifyCredentialBootstrapOutput(data: string): void {
   for (const value of values) {
     if (notifiedCredentialBootstrapValues.has(value)) continue;
     notifiedCredentialBootstrapValues.add(value);
+    log(formatCredentialTrace('bootstrap.affordance_forwarded', {
+      sessionId,
+      botId: larkAppIdForUpload,
+      result: value.startsWith('http') ? 'url' : 'device_code',
+    }));
     send({ type: 'user_notify', message: `🔑 ${value}`, turnId: currentBotmuxTurnId });
   }
   if (/(?:二维码|scan\s+(?:the\s+)?qr|qr\s*code)/i.test(credentialBootstrapTail)
@@ -6130,6 +6182,13 @@ function maybeNotifyCredentialBootstrapOutput(data: string): void {
   if (credentialBootstrapTail.includes('登录未完成或校验失败')
     || credentialBootstrapTail.includes('凭证初始化等待超时')
     || credentialBootstrapTail.includes('凭证初始化全部完成')) {
+    const completed = credentialBootstrapTail.includes('凭证初始化全部完成');
+    log(formatCredentialTrace(completed ? 'bootstrap.completed' : 'bootstrap.failed', {
+      sessionId,
+      botId: larkAppIdForUpload,
+      result: completed ? 'ready' : 'failed',
+      reason: completed ? undefined : 'login_incomplete_or_timeout',
+    }));
     credentialBootstrapActive = false;
     if (credentialBootstrapQrTimer) {
       clearTimeout(credentialBootstrapQrTimer);
@@ -8177,19 +8236,60 @@ async function spawnCli(
   // platforms, or a sandbox-enabled bot bricks the moment it switches to riff.
   const riffRemoteBackend = !localSandboxApplies(effectiveBackendType);
   const ownerCredentialIsolation = !!cfg.credentialIsolation || !!cfg.credentialPrincipal;
+  let credentialBootstrapPlanCount = 0;
   if (ownerCredentialIsolation) {
+    log(formatCredentialTrace('worker.snapshot_received', {
+      sessionId: cfg.sessionId,
+      botId: cfg.larkAppId,
+      ownerId: cfg.credentialPrincipal?.ownerId,
+      openId: cfg.credentialPrincipal?.openId,
+      backend: effectiveBackendType,
+      source: 'worker',
+      result: cfg.credentialIsolation && cfg.credentialPrincipal ? 'complete' : 'incomplete',
+      count: cfg.credentialIsolation?.mounts.length,
+      sandbox: cfg.sandbox,
+    }));
     if (!cfg.credentialIsolation || !cfg.credentialPrincipal) {
+      log(formatCredentialTrace('worker.validation_failed', {
+        sessionId: cfg.sessionId, botId: cfg.larkAppId, backend: effectiveBackendType,
+        result: 'rejected', reason: 'snapshot_incomplete',
+      }));
       throw new Error('credential isolation snapshot is incomplete (principal and mounts are both required)');
     }
     if (process.platform !== 'linux') {
+      log(formatCredentialTrace('worker.validation_failed', {
+        sessionId: cfg.sessionId, botId: cfg.larkAppId,
+        ownerId: cfg.credentialPrincipal.ownerId, backend: effectiveBackendType,
+        result: 'rejected', reason: 'linux_bwrap_required',
+      }));
       throw new Error('owner credential isolation requires Linux bubblewrap');
     }
     if (effectiveBackendType !== 'pty' && effectiveBackendType !== 'tmux') {
+      log(formatCredentialTrace('worker.validation_failed', {
+        sessionId: cfg.sessionId, botId: cfg.larkAppId,
+        ownerId: cfg.credentialPrincipal.ownerId, backend: effectiveBackendType,
+        result: 'rejected', reason: 'backend_unsupported',
+      }));
       throw new Error(`owner credential isolation does not support backend ${effectiveBackendType}`);
     }
     if (cfg.sandbox !== true) {
+      log(formatCredentialTrace('worker.validation_failed', {
+        sessionId: cfg.sessionId, botId: cfg.larkAppId,
+        ownerId: cfg.credentialPrincipal.ownerId, backend: effectiveBackendType,
+        result: 'rejected', reason: 'frozen_sandbox_missing', sandbox: cfg.sandbox,
+      }));
       throw new Error('owner credential isolation requires the frozen file sandbox');
     }
+    log(formatCredentialTrace('worker.validation_passed', {
+      sessionId: cfg.sessionId,
+      botId: cfg.larkAppId,
+      ownerId: cfg.credentialPrincipal.ownerId,
+      openId: cfg.credentialPrincipal.openId,
+      backend: effectiveBackendType,
+      result: 'accepted',
+      count: cfg.credentialIsolation.mounts.length,
+      sandbox: true,
+    }));
   }
   if (riffRemoteBackend && (cfg.sandbox === true || cfg.readIsolation === true)) {
     log('Sandbox flag set but backend is riff (remote sandbox, no local process) — local sandbox bypassed');
@@ -9308,9 +9408,52 @@ async function spawnCli(
           credentialIsolation: cfg.credentialIsolation,
         }, sandboxHome, canonical(configuredBotmuxHome))
       : [];
-    ensureCredentialBindSources(credentialBindMounts);
-    const credentialBootstraps = ownerCredentialIsolation
-      ? resolvePendingCredentialBootstraps(
+    if (ownerCredentialIsolation) {
+      log(formatCredentialTrace('mount.plan_ready', {
+        sessionId: cfg.sessionId,
+        botId: cfg.larkAppId,
+        ownerId: cfg.credentialPrincipal!.ownerId,
+        backend: effectiveBackendType,
+        result: 'ready',
+        count: credentialBindMounts.length,
+      }));
+      for (const mount of credentialBindMounts) {
+        log(formatCredentialTrace('mount.resolved', {
+          sessionId: cfg.sessionId,
+          botId: cfg.larkAppId,
+          ownerId: cfg.credentialPrincipal!.ownerId,
+          mountId: mount.id,
+          ownerSubdir: mount.ownerSubdir,
+          target: mount.target,
+          result: 'ready',
+        }));
+      }
+    }
+    try {
+      ensureCredentialBindSources(credentialBindMounts);
+    } catch (error) {
+      log(formatCredentialTrace('mount.source_prepare_failed', {
+        sessionId: cfg.sessionId,
+        botId: cfg.larkAppId,
+        ownerId: cfg.credentialPrincipal?.ownerId,
+        result: 'error',
+        reason: error instanceof Error ? error.message : String(error),
+      }));
+      throw error;
+    }
+    if (ownerCredentialIsolation) {
+      log(formatCredentialTrace('mount.sources_ready', {
+        sessionId: cfg.sessionId,
+        botId: cfg.larkAppId,
+        ownerId: cfg.credentialPrincipal!.ownerId,
+        result: 'ready',
+        count: credentialBindMounts.length,
+      }));
+    }
+    let credentialBootstraps: ReturnType<typeof resolvePendingCredentialBootstraps> = [];
+    if (ownerCredentialIsolation) {
+      try {
+        credentialBootstraps = resolvePendingCredentialBootstraps(
           credentialBindMounts,
           canonical(configuredBotmuxHome),
           cfg.credentialPrincipal!.ownerId,
@@ -9325,8 +9468,41 @@ async function spawnCli(
             }
             return locateOnPath(command) ?? undefined;
           },
-        )
-      : [];
+        );
+      } catch (error) {
+        log(formatCredentialTrace('bootstrap.plan_failed', {
+          sessionId: cfg.sessionId,
+          botId: cfg.larkAppId,
+          ownerId: cfg.credentialPrincipal!.ownerId,
+          result: 'error',
+          reason: error instanceof Error ? error.message : String(error),
+        }));
+        throw error;
+      }
+    }
+    if (ownerCredentialIsolation) {
+      log(formatCredentialTrace('bootstrap.plan_ready', {
+        sessionId: cfg.sessionId,
+        botId: cfg.larkAppId,
+        ownerId: cfg.credentialPrincipal!.ownerId,
+        backend: effectiveBackendType,
+        result: credentialBootstraps.length ? 'ready' : 'not_required',
+        count: credentialBootstraps.length,
+      }));
+      for (const spec of credentialBootstraps) {
+        log(formatCredentialTrace('bootstrap.mount_planned', {
+          sessionId: cfg.sessionId,
+          botId: cfg.larkAppId,
+          ownerId: cfg.credentialPrincipal!.ownerId,
+          mountId: spec.id,
+          result: 'ready',
+          count: spec.successPaths.length,
+          timeoutSeconds: spec.timeoutSeconds,
+          hasCheck: !!spec.checkCommand,
+        }));
+      }
+      credentialBootstrapPlanCount = credentialBootstraps.length;
+    }
 
     const fsPolicyCtx = {
       platform: process.platform as 'darwin' | 'linux',
@@ -9454,6 +9630,17 @@ async function spawnCli(
         throw err;
       }
     })();
+    if (ownerCredentialIsolation) {
+      log(formatCredentialTrace('sandbox.policy_compiled', {
+        sessionId: cfg.sessionId,
+        botId: cfg.larkAppId,
+        ownerId: cfg.credentialPrincipal!.ownerId,
+        backend: effectiveBackendType,
+        result: 'ready',
+        count: policy.rules.length,
+        sandbox: true,
+      }));
+    }
     // A no-transport turn drops caller allow paths (extraWrite / readonlyRoots /
     // user RW+RO) that fell inside a Feishu-authority root. Log the suppression so
     // it's diagnosable rather than a silent hole (codex).
@@ -9500,8 +9687,29 @@ async function spawnCli(
         );
         publishSandboxRelayCapability();
         log(`Sandbox REATTACH (${cfg.cliId}): live pane CLI kept, re-wired outbox=${att.outbox}`);
+        if (ownerCredentialIsolation) {
+          log(formatCredentialTrace('sandbox.reattached', {
+            sessionId: cfg.sessionId,
+            botId: cfg.larkAppId,
+            ownerId: cfg.credentialPrincipal!.ownerId,
+            backend: effectiveBackendType,
+            result: 'reattached',
+            count: credentialBindMounts.length,
+            sandbox: true,
+          }));
+        }
       } else {
         log(`Sandbox REATTACH (${cfg.cliId}): no on-disk sandbox tree — reattaching live pane as-is`);
+        if (ownerCredentialIsolation) {
+          log(formatCredentialTrace('sandbox.reattach_missing', {
+            sessionId: cfg.sessionId,
+            botId: cfg.larkAppId,
+            ownerId: cfg.credentialPrincipal!.ownerId,
+            backend: effectiveBackendType,
+            result: 'missing',
+            reason: 'sandbox_tree_not_found',
+          }));
+        }
       }
     } else {
       const sbx = prepareDirectSandbox({
@@ -9519,8 +9727,30 @@ async function spawnCli(
       if (!sbx) {
         // FAIL-SAFE: never silently run unsandboxed.
         const msg = 'sandbox requested but could not be established (bwrap missing or setup failed) — aborting spawn';
+        if (ownerCredentialIsolation) {
+          log(formatCredentialTrace('sandbox.prepare_failed', {
+            sessionId: cfg.sessionId,
+            botId: cfg.larkAppId,
+            ownerId: cfg.credentialPrincipal!.ownerId,
+            backend: effectiveBackendType,
+            result: 'error',
+            reason: 'bwrap_unavailable_or_setup_failed',
+            sandbox: true,
+          }));
+        }
         log(msg);
         throw new Error(msg);
+      }
+      if (ownerCredentialIsolation) {
+        log(formatCredentialTrace('sandbox.prepared', {
+          sessionId: cfg.sessionId,
+          botId: cfg.larkAppId,
+          ownerId: cfg.credentialPrincipal!.ownerId,
+          backend: effectiveBackendType,
+          result: 'ready',
+          count: credentialBindMounts.length,
+          sandbox: true,
+        }));
       }
       spawnBin = sbx.bin;
       spawnArgs = sbx.args;
@@ -9777,14 +10007,40 @@ async function spawnCli(
     log(`Failed to capture reproduce command: ${err?.message ?? err}`);
   }
 
-  backend.spawn(spawnBin, spawnArgs, {
-    cwd: spawnCwd,
-    cols: PTY_COLS,
-    rows: PTY_ROWS,
-    env: childEnv as Record<string, string>,
-    injectEnv: perBotInjectKeys.length ? perBotInjectEnv : undefined,
-    launchShell: lastInitConfig?.launchShell,
-  });
+  if (ownerCredentialIsolation) {
+    log(formatCredentialTrace('sandbox.process_starting', {
+      sessionId: cfg.sessionId,
+      botId: cfg.larkAppId,
+      ownerId: cfg.credentialPrincipal!.ownerId,
+      backend: effectiveBackendType,
+      result: 'starting',
+      count: credentialBootstrapPlanCount,
+      sandbox: true,
+    }));
+  }
+  try {
+    backend.spawn(spawnBin, spawnArgs, {
+      cwd: spawnCwd,
+      cols: PTY_COLS,
+      rows: PTY_ROWS,
+      env: childEnv as Record<string, string>,
+      injectEnv: perBotInjectKeys.length ? perBotInjectEnv : undefined,
+      launchShell: lastInitConfig?.launchShell,
+    });
+  } catch (error) {
+    if (ownerCredentialIsolation) {
+      log(formatCredentialTrace('sandbox.process_start_failed', {
+        sessionId: cfg.sessionId,
+        botId: cfg.larkAppId,
+        ownerId: cfg.credentialPrincipal!.ownerId,
+        backend: effectiveBackendType,
+        result: 'error',
+        reason: error instanceof Error ? error.message : String(error),
+        sandbox: true,
+      }));
+    }
+    throw error;
+  }
 
   if (selectedBackend.createdHerdrSessionName) {
     send({
@@ -9798,6 +10054,17 @@ async function spawnCli(
   // can verify they were spawned inside a botmux session by walking the
   // process tree and looking for a matching pid file in this directory.
   const cliPid = backend.getChildPid?.();
+  if (ownerCredentialIsolation) {
+    log(formatCredentialTrace('sandbox.process_started', {
+      sessionId: cfg.sessionId,
+      botId: cfg.larkAppId,
+      ownerId: cfg.credentialPrincipal!.ownerId,
+      backend: effectiveBackendType,
+      result: 'started',
+      pid: cliPid ?? undefined,
+      sandbox: true,
+    }));
+  }
   publishLocalProcessAttestation(cliPid ?? undefined);
   if (cliPid && process.env.SESSION_DATA_DIR) {
     const markersDir = join(process.env.SESSION_DATA_DIR, '.botmux-cli-pids');
