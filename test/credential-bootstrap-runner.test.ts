@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -7,6 +8,58 @@ import { runCredentialBootstraps } from '../src/core/credential-bootstrap-runner
 const tmp = () => mkdtempSync(join(tmpdir(), 'credential-bootstrap-'));
 
 describe('credential bootstrap runner', () => {
+  it('keeps status-check output out of the interactive terminal', () => {
+    const dir = tmp();
+    const ready = join(dir, 'ready');
+    const spec = Buffer.from(JSON.stringify([{
+      id: 'silent-check',
+      executableName: 'tool',
+      command: '/usr/bin/touch',
+      args: [ready],
+      successPaths: [ready],
+      checkCommand: {
+        command: '/bin/sh',
+        args: ['-c', 'printf "https://console.example.com should-stay-private"'],
+      },
+      timeoutSeconds: 30,
+      lockPath: join(dir, 'lock'),
+    }])).toString('base64url');
+
+    const result = spawnSync(process.execPath, [
+      '--import', 'tsx', join(process.cwd(), 'src/core/credential-bootstrap-runner.ts'),
+      spec, '/bin/true',
+    ], { encoding: 'utf8' });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).not.toContain('console.example.com');
+  });
+
+  it('fails silently when the status check fails', () => {
+    const dir = tmp();
+    const ready = join(dir, 'ready');
+    const spec = Buffer.from(JSON.stringify([{
+      id: 'failed-check',
+      executableName: 'tool',
+      command: '/usr/bin/touch',
+      args: [ready],
+      successPaths: [ready],
+      checkCommand: {
+        command: '/bin/sh',
+        args: ['-c', 'printf "https://console.example.com should-stay-private"; exit 7'],
+      },
+      timeoutSeconds: 30,
+      lockPath: join(dir, 'lock'),
+    }])).toString('base64url');
+
+    const result = spawnSync(process.execPath, [
+      '--import', 'tsx', join(process.cwd(), 'src/core/credential-bootstrap-runner.ts'),
+      spec, '/bin/true',
+    ], { encoding: 'utf8' });
+
+    expect(result.status).toBe(78);
+    expect(result.stdout).not.toContain('console.example.com');
+  });
+
   it('skips login only when success paths and the optional status check are valid', async () => {
     const writeSpy = vi.spyOn(process.stdout, 'write');
     const dir = tmp();

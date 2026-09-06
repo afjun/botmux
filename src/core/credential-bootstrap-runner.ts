@@ -80,10 +80,15 @@ interface CredentialCommandResult {
   errorCode?: string;
 }
 
-async function runCommand(command: string, args: string[], timeoutMs: number): Promise<CredentialCommandResult> {
+async function runCommand(
+  command: string,
+  args: string[],
+  timeoutMs: number,
+  stdio: 'inherit' | 'ignore' = 'inherit',
+): Promise<CredentialCommandResult> {
   return new Promise(resolve => {
     const startedAt = Date.now();
-    const child = spawn(command, args, { stdio: 'inherit', detached: true });
+    const child = spawn(command, args, { stdio, detached: true });
     activeChildPid = child.pid;
     let settled = false;
     const finish = (result: Omit<CredentialCommandResult, 'durationMs'>) => {
@@ -160,7 +165,7 @@ async function acquireOrWait(spec: CredentialBootstrapRunnerSpec): Promise<'acqu
 async function bootstrapReady(spec: CredentialBootstrapRunnerSpec): Promise<boolean> {
   if (!bootstrapSuccessPathsReady(spec.successPaths)) return false;
   return spec.checkCommand
-    ? (await runCommand(spec.checkCommand.command, spec.checkCommand.args, 30_000)).ok
+    ? (await runCommand(spec.checkCommand.command, spec.checkCommand.args, 30_000, 'ignore')).ok
     : true;
 }
 
@@ -213,7 +218,7 @@ export async function runCredentialBootstraps(specs: readonly CredentialBootstra
       const commandResult = await runCommand(spec.command, spec.args, spec.timeoutSeconds * 1_000);
       const pathsOk = bootstrapSuccessPathsReady(spec.successPaths);
       const checkResult = commandResult.ok && pathsOk && spec.checkCommand
-        ? await runCommand(spec.checkCommand.command, spec.checkCommand.args, 30_000)
+        ? await runCommand(spec.checkCommand.command, spec.checkCommand.args, 30_000, 'ignore')
         : undefined;
       const checkOk = commandResult.ok && pathsOk && (checkResult?.ok ?? true);
       const failedCommand = !commandResult.ok ? commandResult : checkResult && !checkResult.ok ? checkResult : undefined;
