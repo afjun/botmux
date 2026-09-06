@@ -1,17 +1,21 @@
 import { describe, expect, it, vi } from 'vitest';
-import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runCredentialBootstraps } from '../src/core/credential-bootstrap-runner.js';
 
 const tmp = () => mkdtempSync(join(tmpdir(), 'credential-bootstrap-'));
+const lease = (dir: string, sessionId = 'session-test', sessionCreatedAt = '2026-09-06T11:25:00.000Z') => ({
+  directory: join(dir, '.bootstrap'), sessionId, sessionCreatedAt,
+});
+const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 describe('credential bootstrap runner', () => {
   it('keeps status-check output out of the interactive terminal', () => {
     const dir = tmp();
     const ready = join(dir, 'ready');
-    const spec = Buffer.from(JSON.stringify([{
+    const spec = Buffer.from(JSON.stringify({ bootstraps: [{
       id: 'silent-check',
       executableName: 'tool',
       command: '/usr/bin/touch',
@@ -22,8 +26,7 @@ describe('credential bootstrap runner', () => {
         args: ['-c', 'printf "https://console.example.com should-stay-private"'],
       },
       timeoutSeconds: 30,
-      lockPath: join(dir, 'lock'),
-    }])).toString('base64url');
+    }], lease: lease(dir) })).toString('base64url');
 
     const result = spawnSync(process.execPath, [
       '--import', 'tsx', join(process.cwd(), 'src/core/credential-bootstrap-runner.ts'),
@@ -37,7 +40,7 @@ describe('credential bootstrap runner', () => {
   it('fails silently when the status check fails', () => {
     const dir = tmp();
     const ready = join(dir, 'ready');
-    const spec = Buffer.from(JSON.stringify([{
+    const spec = Buffer.from(JSON.stringify({ bootstraps: [{
       id: 'failed-check',
       executableName: 'tool',
       command: '/usr/bin/touch',
@@ -48,8 +51,7 @@ describe('credential bootstrap runner', () => {
         args: ['-c', 'printf "https://console.example.com should-stay-private"; exit 7'],
       },
       timeoutSeconds: 30,
-      lockPath: join(dir, 'lock'),
-    }])).toString('base64url');
+    }], lease: lease(dir) })).toString('base64url');
 
     const result = spawnSync(process.execPath, [
       '--import', 'tsx', join(process.cwd(), 'src/core/credential-bootstrap-runner.ts'),
@@ -64,7 +66,6 @@ describe('credential bootstrap runner', () => {
     const writeSpy = vi.spyOn(process.stdout, 'write');
     const dir = tmp();
     const ready = join(dir, 'ready');
-    const lock = join(dir, 'lock');
     writeFileSync(ready, 'ok');
 
     await expect(runCredentialBootstraps([{
@@ -75,9 +76,7 @@ describe('credential bootstrap runner', () => {
       successPaths: [ready],
       checkCommand: { command: '/bin/true', args: [] },
       timeoutSeconds: 30,
-      lockPath: lock,
-    }])).resolves.toBe(true);
-    expect(existsSync(lock)).toBe(false);
+    }], lease(dir))).resolves.toBe('ready');
     expect(writeSpy.mock.calls.flat().join('')).toContain(
       '[owner-credential] event=bootstrap.skipped mount=valid result=already_ready',
     );
@@ -88,7 +87,6 @@ describe('credential bootstrap runner', () => {
     const writeSpy = vi.spyOn(process.stdout, 'write');
     const dir = tmp();
     const ready = join(dir, 'stale');
-    const lock = join(dir, 'lock');
     writeFileSync(ready, 'stale');
 
     await expect(runCredentialBootstraps([{
@@ -99,9 +97,7 @@ describe('credential bootstrap runner', () => {
       successPaths: [ready],
       checkCommand: { command: '/bin/false', args: [] },
       timeoutSeconds: 30,
-      lockPath: lock,
-    }])).resolves.toBe(false);
-    expect(existsSync(lock)).toBe(false);
+    }], lease(dir))).resolves.toBe('failed');
     expect(writeSpy.mock.calls.flat().join('')).toContain(
       '[owner-credential] event=bootstrap.validation_finished mount=stale result=failed',
     );
@@ -122,8 +118,7 @@ describe('credential bootstrap runner', () => {
       args: [ready],
       successPaths: [ready],
       timeoutSeconds: 30,
-      lockPath: join(dir, 'lock'),
-    }])).resolves.toBe(true);
+    }], lease(dir))).resolves.toBe('ready');
 
     expect(writeSpy.mock.calls.flat().join('')).toContain(
       '[owner-credential] event=bootstrap.batch_completed result=ready count=1 fresh=true',
@@ -139,12 +134,12 @@ describe('credential bootstrap runner', () => {
 
     await expect(runCredentialBootstraps([{
       id: 'bytedcli', executableName: 'bytedcli', command: '/usr/bin/touch', args: [firstReady],
-      successPaths: [firstReady], timeoutSeconds: 30, lockPath: join(dir, 'first-lock'),
+      successPaths: [firstReady], timeoutSeconds: 30,
     }, {
       id: 'bytedcli~meego', displayName: 'meego', executableName: 'bytedcli',
       command: '/usr/bin/touch', args: [secondReady],
-      successPaths: [secondReady], timeoutSeconds: 30, lockPath: join(dir, 'second-lock'),
-    }])).resolves.toBe(true);
+      successPaths: [secondReady], timeoutSeconds: 30,
+    }], lease(dir))).resolves.toBe('ready');
 
     const trace = writeSpy.mock.calls.flat().join('');
     expect(trace.indexOf('event=bootstrap.step_completed mount=bytedcli'))
@@ -166,8 +161,7 @@ describe('credential bootstrap runner', () => {
       args: ['--secret', 'must-not-appear'],
       successPaths: [join(dir, 'ready')],
       timeoutSeconds: 1,
-      lockPath: join(dir, 'lock'),
-    }])).resolves.toBe(false);
+    }], lease(dir))).resolves.toBe('failed');
 
     const trace = output.flat().join('');
     expect(trace).toContain('reason=login_spawn_error');
@@ -176,22 +170,50 @@ describe('credential bootstrap runner', () => {
     writeSpy.mockRestore();
   });
 
-  it('reclaims a stale lock left by an interrupted sandbox', async () => {
+  it('keeps coordination stable when a tool recreates its credential directory', async () => {
     const dir = tmp();
-    const lock = join(dir, 'lock');
-    writeFileSync(lock, '');
-    const stale = new Date(Date.now() - 60_000);
-    utimesSync(lock, stale, stale);
+    const credentials = join(dir, 'credentials');
+    const ready = join(credentials, 'ready');
+    mkdirSync(credentials);
 
     await expect(runCredentialBootstraps([{
-      id: 'stale-lock',
-      executableName: 'true',
-      command: '/bin/true',
-      args: [],
-      successPaths: [join(dir, 'missing')],
+      id: 'recreated-directory',
+      executableName: 'sh',
+      command: '/bin/sh',
+      args: ['-c', `rm -rf "${credentials}" && mkdir "${credentials}" && touch "${ready}"`],
+      successPaths: [ready],
       timeoutSeconds: 1,
-      lockPath: lock,
-    }])).resolves.toBe(false);
-    expect(existsSync(lock)).toBe(false);
+    }], lease(dir))).resolves.toBe('ready');
+    expect(readdirSync(lease(dir).directory)).toEqual([]);
   });
+
+  it('supersedes an older login runner with the newest durable session', async () => {
+    const dir = tmp();
+    const ready = join(dir, 'ready');
+    const runner = join(process.cwd(), 'src/core/credential-bootstrap-runner.ts');
+    const start = (sessionId: string, sessionCreatedAt: string, command: string, args: string[]) => {
+      const payload = Buffer.from(JSON.stringify({
+        bootstraps: [{
+          id: 'shared', executableName: command, command, args,
+          successPaths: [ready], timeoutSeconds: 15,
+        }],
+        lease: lease(dir, sessionId, sessionCreatedAt),
+      })).toString('base64url');
+      const child = spawn(process.execPath, ['--import', 'tsx', runner, payload, '/bin/true'], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      return {
+        child,
+        exited: new Promise<number | null>(resolve => child.once('exit', code => resolve(code))),
+      };
+    };
+
+    const older = start('session-old', '2026-09-06T11:20:00.000Z', '/bin/sh', ['-c', 'sleep 10']);
+    for (let attempt = 0; attempt < 30 && !existsSync(lease(dir).directory); attempt++) await delay(50);
+    for (let attempt = 0; attempt < 30 && readdirSync(lease(dir).directory).length === 0; attempt++) await delay(50);
+    const newer = start('session-new', '2026-09-06T11:25:00.000Z', '/usr/bin/touch', [ready]);
+
+    await expect(newer.exited).resolves.toBe(0);
+    await expect(older.exited).resolves.toBe(79);
+  }, 10_000);
 });

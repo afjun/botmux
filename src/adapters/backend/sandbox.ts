@@ -29,7 +29,10 @@ import {
   MCP_GATEWAY_REQUIRED_ENV,
   MCP_GATEWAY_SOCKET_ENV,
 } from '../../core/plugins/mcp/environment.js';
-import type { CredentialBootstrapRunnerSpec } from '../../core/credential-bootstrap-runner.js';
+import type {
+  CredentialBootstrapLeaseSpec,
+  CredentialBootstrapRunnerSpec,
+} from '../../core/credential-bootstrap-runner.js';
 
 export interface CredentialJwtBridgeSpec {
   executableName: string;
@@ -573,6 +576,7 @@ export function prepareDirectSandbox(opts: {
   /** Missing credential bootstraps to execute inside this exact bwrap namespace
    * before the real CLI is started. */
   credentialBootstraps?: readonly CredentialBootstrapRunnerSpec[];
+  credentialBootstrapLease?: CredentialBootstrapLeaseSpec & { source: string };
   /** Tool shims that obtain a fresh ByteCloud JWT from the isolated bytedcli
    * identity for every invocation. */
   credentialJwtBridges?: readonly CredentialJwtBridgeSpec[];
@@ -713,6 +717,14 @@ exec ${shellQuote(bridge.command)} "$@"
   }
 
   const args = [...compiled.args];
+  if (opts.credentialBootstrapLease) {
+    const source = assertCredentialIsolationPath(opts.credentialBootstrapLease.source, 'bootstrap lease source');
+    const stat = lstatSync(source);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) {
+      throw new Error(`credential bootstrap lease source has wrong shape: ${source}`);
+    }
+    args.push('--bind', source, opts.credentialBootstrapLease.directory);
+  }
   // Shim bin at a fixed path under the fresh /run tmpfs — appended after the
   // rule mounts (later mount wins over the tmpfs). PATH points here first.
   args.push('--ro-bind', shimBin, '/run/sbxbin');
@@ -800,7 +812,15 @@ exec ${shellQuote(bridge.command)} "$@"
     try { runner = realpathSync(runner); } catch { /* source-tree tests have no dist .js yet */ }
     const nodeBin = realpathSync(process.execPath);
     const specFileName = 'credential-bootstraps.json';
-    writeFileSync(join(shimBin, specFileName), JSON.stringify(opts.credentialBootstraps), { mode: 0o600 });
+    if (!opts.credentialBootstrapLease) throw new Error('credential bootstrap lease is required');
+    writeFileSync(join(shimBin, specFileName), JSON.stringify({
+      bootstraps: opts.credentialBootstraps,
+      lease: {
+        directory: opts.credentialBootstrapLease.directory,
+        sessionId: opts.credentialBootstrapLease.sessionId,
+        sessionCreatedAt: opts.credentialBootstrapLease.sessionCreatedAt,
+      },
+    }), { mode: 0o600 });
     args.push('--', nodeBin, runner, `@/run/sbxbin/${specFileName}`, execBin, ...opts.cliArgs);
   } else {
     args.push('--', execBin, ...opts.cliArgs);

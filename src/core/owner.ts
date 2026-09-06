@@ -41,6 +41,10 @@ export function ownerDir(botmuxHome: string, ownerId: string): string {
   return `${botmuxHome.replace(/\/+$/, '')}/owners/${ownerId}`;
 }
 
+export function credentialBootstrapLeaseDirectory(botmuxHome: string, ownerId: string): string {
+  return join(ownerDir(botmuxHome, ownerId), '.bootstrap');
+}
+
 /** Build the security fields that must be included in createSession's first
  * durable write. Disabled configs deliberately return an empty object. */
 export function freezeCredentialIsolation(
@@ -157,9 +161,6 @@ export function resolvePendingCredentialBootstraps(
           ? { command: checkCommand, args: [...bootstrap.checkCommand.args] }
           : undefined,
         timeoutSeconds: bootstrap.timeoutSeconds,
-        lockPath: mount.kind === 'directory'
-          ? join(mount.target, `.botmux-bootstrap-${bootstrapId}.lock`)
-          : `${mount.target}.botmux-bootstrap-${bootstrapId}.lock`,
       });
     }
   }

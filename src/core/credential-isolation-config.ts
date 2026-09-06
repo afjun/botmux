@@ -279,6 +279,9 @@ function normalizeMount(raw: MutableMount, base: CredentialMountConfig | undefin
   const kind = raw.kind ?? base?.kind;
   if (kind !== 'directory' && kind !== 'file') invalid(`${path}.kind`, 'must be "directory" or "file"');
   const ownerSubdir = normalizeRelativePath(raw.ownerSubdir ?? base?.ownerSubdir, `${path}.ownerSubdir`);
+  if (ownerSubdir === '.bootstrap' || ownerSubdir.startsWith('.bootstrap/')) {
+    invalid(`${path}.ownerSubdir`, 'uses the reserved bootstrap coordination path');
+  }
   const bootstrap = raw.bootstrap === undefined
     ? base?.bootstrap && cloneCredentialMount(base).bootstrap
     : raw.bootstrap === null

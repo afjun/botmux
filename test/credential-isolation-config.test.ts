@@ -203,6 +203,14 @@ describe('normalizeCredentialIsolationConfig', () => {
       })).toThrow('ownerSubdir');
     });
 
+  it.each(['.bootstrap', '.bootstrap/tool'])('reserves owner bootstrap coordination path %s', ownerSubdir => {
+    expect(() => normalize({
+      enabled: true,
+      presets: { bytedcli: false, bytecloud: false, devflow: false, playwright: false },
+      mounts: [{ id: 'unsafe', kind: 'directory', target: '~/.config/example', ownerSubdir }],
+    })).toThrow('reserved');
+  });
+
   it.each([29, 1801, 30.5, '600'])('rejects bootstrap timeout %s', timeoutSeconds => {
     expect(() => normalize({
       enabled: true,

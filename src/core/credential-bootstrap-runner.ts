@@ -1,8 +1,14 @@
 #!/usr/bin/env node
-import { closeSync, existsSync, openSync, readFileSync, statSync, unlinkSync, utimesSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { formatCredentialTrace, type CredentialTraceFields } from './credential-isolation-log.js';
+import {
+  acquireCredentialBootstrapLease,
+  activeCredentialBootstrapLeases,
+  releaseCredentialBootstrapLease,
+  type CredentialBootstrapLease,
+} from './credential-bootstrap-lease.js';
 
 export interface CredentialBootstrapRunnerSpec {
   id: string;
@@ -13,17 +19,21 @@ export interface CredentialBootstrapRunnerSpec {
   successPaths: string[];
   checkCommand?: { command: string; args: string[] };
   timeoutSeconds: number;
-  lockPath: string;
 }
 
+export interface CredentialBootstrapLeaseSpec {
+  directory: string;
+  sessionId: string;
+  sessionCreatedAt: string;
+}
+
+export type CredentialBootstrapRunResult = 'ready' | 'failed' | 'superseded';
+
 let activeChildPid: number | undefined;
-const ownedLockPaths = new Set<string>();
-const lockHeartbeats = new Map<string, ReturnType<typeof setInterval>>();
+let activeLease: CredentialBootstrapLease | undefined;
+let leaseHeartbeat: ReturnType<typeof setInterval> | undefined;
 let shuttingDown = false;
-// ponytail: mtime lease favors crash recovery over strict mutual exclusion;
-// use an OS advisory lock if runners may be paused for more than 30 seconds.
-const LOCK_HEARTBEAT_MS = 5_000;
-const LOCK_STALE_MS = 30_000;
+const LEASE_HEARTBEAT_MS = 500;
 
 function trace(event: string, fields: CredentialTraceFields = {}): void {
   process.stdout.write(`\n${formatCredentialTrace(event, {
@@ -38,16 +48,13 @@ function terminateProcessGroup(pid: number | undefined, signal: NodeJS.Signals):
   try { process.kill(-pid, signal); } catch { /* already gone */ }
 }
 
-function cleanupOwnedLocks(): void {
-  const count = ownedLockPaths.size;
-  for (const lockPath of ownedLockPaths) {
-    const heartbeat = lockHeartbeats.get(lockPath);
-    if (heartbeat) clearInterval(heartbeat);
-    lockHeartbeats.delete(lockPath);
-    try { unlinkSync(lockPath); } catch { /* already gone */ }
-  }
-  ownedLockPaths.clear();
-  if (count > 0) trace('bootstrap.locks_cleaned', { result: 'released', count });
+function cleanupOwnedLease(): void {
+  if (leaseHeartbeat) clearInterval(leaseHeartbeat);
+  leaseHeartbeat = undefined;
+  if (!activeLease) return;
+  releaseCredentialBootstrapLease(activeLease);
+  trace('bootstrap.lease_released', { result: 'released', leaseId: activeLease.record.leaseId });
+  activeLease = undefined;
 }
 
 function installSignalCleanup(): void {
@@ -57,8 +64,14 @@ function installSignalCleanup(): void {
       shuttingDown = true;
       trace('bootstrap.signal_received', { result: 'stopping', reason: signal });
       terminateProcessGroup(activeChildPid, signal);
-      cleanupOwnedLocks();
-      process.exit(128);
+      // Keep the lease until the login child exits so a newer session cannot
+      // write the same credential tree concurrently. The normal command path
+      // releases it; this timer handles a child that ignores the first signal.
+      setTimeout(() => {
+        terminateProcessGroup(activeChildPid, 'SIGKILL');
+        cleanupOwnedLease();
+        process.exit(128);
+      }, 2_000);
     });
   }
 }
@@ -118,48 +131,32 @@ async function runCommand(
   });
 }
 
-async function acquireOrWait(spec: CredentialBootstrapRunnerSpec): Promise<'acquired' | 'timeout'> {
-  const deadline = Date.now() + spec.timeoutSeconds * 1_000;
-  let waitingLogged = false;
-  for (;;) {
-    try {
-      closeSync(openSync(spec.lockPath, 'wx', 0o600));
-      ownedLockPaths.add(spec.lockPath);
-      const heartbeat = setInterval(() => {
-        try { utimesSync(spec.lockPath, new Date(), new Date()); } catch { /* released */ }
-      }, LOCK_HEARTBEAT_MS);
-      heartbeat.unref();
-      lockHeartbeats.set(spec.lockPath, heartbeat);
-      trace('bootstrap.lock_acquired', { mountId: spec.id, result: 'acquired' });
-      return 'acquired';
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      try {
-        if (Date.now() - statSync(spec.lockPath).mtimeMs > LOCK_STALE_MS) {
-          unlinkSync(spec.lockPath);
-          trace('bootstrap.lock_reclaimed', { mountId: spec.id, result: 'stale_removed' });
-          continue;
-        }
-      } catch { /* lock changed between stat and unlink; retry normally */ }
-      if (!waitingLogged) {
-        waitingLogged = true;
-        trace('bootstrap.lock_waiting', {
-          mountId: spec.id,
-          result: 'waiting',
-          timeoutSeconds: spec.timeoutSeconds,
-        });
-      }
-    }
-    if (Date.now() >= deadline) {
-      trace('bootstrap.lock_timeout', {
-        mountId: spec.id,
-        result: 'timeout',
-        timeoutSeconds: spec.timeoutSeconds,
-      });
-      return 'timeout';
-    }
-    await wait(1_000);
+async function acquireLatestLease(spec: CredentialBootstrapLeaseSpec): Promise<CredentialBootstrapLease | undefined> {
+  const lease = acquireCredentialBootstrapLease(spec.directory, spec);
+  activeLease = lease;
+  trace('bootstrap.lease_published', { result: 'published', leaseId: lease.record.leaseId });
+  if (!lease.isCurrent()) return undefined;
+
+  let supersededLogged = false;
+  const stopIfSuperseded = () => {
+    lease.heartbeat();
+    if (lease.isCurrent()) return;
+    if (supersededLogged) return;
+    supersededLogged = true;
+    trace('bootstrap.superseded', { result: 'superseded', leaseId: lease.record.leaseId });
+    terminateProcessGroup(activeChildPid, 'SIGTERM');
+    setTimeout(() => terminateProcessGroup(activeChildPid, 'SIGKILL'), 2_000).unref();
+  };
+  leaseHeartbeat = setInterval(stopIfSuperseded, LEASE_HEARTBEAT_MS);
+  leaseHeartbeat.unref();
+
+  // Give an older runner one heartbeat to stop its login child before this
+  // session starts writing the same owner credential tree.
+  while (activeCredentialBootstrapLeases(spec.directory).length > 1) {
+    if (!lease.isCurrent()) return undefined;
+    await wait(100);
   }
+  return lease.isCurrent() ? lease : undefined;
 }
 
 async function bootstrapReady(spec: CredentialBootstrapRunnerSpec): Promise<boolean> {
@@ -169,46 +166,51 @@ async function bootstrapReady(spec: CredentialBootstrapRunnerSpec): Promise<bool
     : true;
 }
 
-export async function runCredentialBootstraps(specs: readonly CredentialBootstrapRunnerSpec[]): Promise<boolean> {
+export async function runCredentialBootstraps(
+  specs: readonly CredentialBootstrapRunnerSpec[],
+  leaseSpec: CredentialBootstrapLeaseSpec,
+): Promise<CredentialBootstrapRunResult> {
   trace('bootstrap.batch_started', { result: 'started', count: specs.length });
-  let fresh = false;
-  for (const spec of specs) {
-    const displayName = spec.displayName ?? spec.id;
-    if (await bootstrapReady(spec)) {
+  const initiallyReady: boolean[] = [];
+  for (const spec of specs) initiallyReady.push(await bootstrapReady(spec));
+  if (initiallyReady.every(Boolean) && activeCredentialBootstrapLeases(leaseSpec.directory).length === 0) {
+    for (const spec of specs) {
       trace('bootstrap.skipped', {
-        mountId: spec.id,
-        result: 'already_ready',
-        count: spec.successPaths.length,
-        hasCheck: !!spec.checkCommand,
-        fresh: false,
+        mountId: spec.id, result: 'already_ready', count: spec.successPaths.length,
+        hasCheck: !!spec.checkCommand, fresh: false,
       });
-      continue;
     }
-    trace('bootstrap.required', {
-      mountId: spec.id,
-      result: 'login_required',
-      count: spec.successPaths.length,
-      timeoutSeconds: spec.timeoutSeconds,
-      hasCheck: !!spec.checkCommand,
-    });
-    const lock = await acquireOrWait(spec);
-    if (lock === 'timeout') {
-      process.stdout.write(`\n[botmux] 凭证初始化等待超时：${displayName}。请使用 /restart 重试。\n`);
-      return false;
-    }
-    try {
-      // Another session may have completed login immediately before this one
-      // acquired the lock. Re-check both paths and optional account status.
+    trace('bootstrap.batch_completed', { result: 'ready', count: specs.length, fresh: false });
+    return 'ready';
+  }
+  const lease = await acquireLatestLease(leaseSpec);
+  if (!lease) {
+    cleanupOwnedLease();
+    trace('bootstrap.batch_superseded', { result: 'superseded', count: specs.length });
+    return 'superseded';
+  }
+  let fresh = false;
+  try {
+    for (const spec of specs) {
+      const displayName = spec.displayName ?? spec.id;
       if (await bootstrapReady(spec)) {
         trace('bootstrap.skipped', {
           mountId: spec.id,
-          result: 'completed_by_other_session',
+          result: 'already_ready',
           count: spec.successPaths.length,
           hasCheck: !!spec.checkCommand,
           fresh: false,
         });
         continue;
       }
+      trace('bootstrap.required', {
+        mountId: spec.id,
+        result: 'login_required',
+        count: spec.successPaths.length,
+        timeoutSeconds: spec.timeoutSeconds,
+        hasCheck: !!spec.checkCommand,
+      });
+      if (!lease.isCurrent()) return 'superseded';
       process.stdout.write(`\n[botmux] 正在初始化 ${displayName} 登录。登录链接、设备码或二维码会显示在此终端。\n`);
       trace('bootstrap.command_started', {
         mountId: spec.id,
@@ -216,10 +218,12 @@ export async function runCredentialBootstraps(specs: readonly CredentialBootstra
         timeoutSeconds: spec.timeoutSeconds,
       });
       const commandResult = await runCommand(spec.command, spec.args, spec.timeoutSeconds * 1_000);
+      if (!lease.isCurrent()) return 'superseded';
       const pathsOk = bootstrapSuccessPathsReady(spec.successPaths);
       const checkResult = commandResult.ok && pathsOk && spec.checkCommand
         ? await runCommand(spec.checkCommand.command, spec.checkCommand.args, 30_000, 'ignore')
         : undefined;
+      if (!lease.isCurrent()) return 'superseded';
       const checkOk = commandResult.ok && pathsOk && (checkResult?.ok ?? true);
       const failedCommand = !commandResult.ok ? commandResult : checkResult && !checkResult.ok ? checkResult : undefined;
       trace('bootstrap.validation_finished', {
@@ -240,7 +244,7 @@ export async function runCredentialBootstraps(specs: readonly CredentialBootstra
       });
       if (!checkOk) {
         process.stdout.write(`\n[botmux] ${displayName} 登录未完成或校验失败。请使用 /restart 重试。\n`);
-        return false;
+        return 'failed';
       }
       fresh = true;
       trace('bootstrap.step_completed', {
@@ -249,17 +253,13 @@ export async function runCredentialBootstraps(specs: readonly CredentialBootstra
         fresh: true,
       });
       process.stdout.write(`\n[botmux] ${displayName} 登录完成。\n`);
-    } finally {
-      const heartbeat = lockHeartbeats.get(spec.lockPath);
-      if (heartbeat) clearInterval(heartbeat);
-      lockHeartbeats.delete(spec.lockPath);
-      try { unlinkSync(spec.lockPath); } catch { /* another cleanup won */ }
-      ownedLockPaths.delete(spec.lockPath);
-      trace('bootstrap.lock_released', { mountId: spec.id, result: 'released' });
     }
+    if (!lease.isCurrent()) return 'superseded';
+    trace('bootstrap.batch_completed', { result: 'ready', count: specs.length, fresh });
+    return 'ready';
+  } finally {
+    cleanupOwnedLease();
   }
-  trace('bootstrap.batch_completed', { result: 'ready', count: specs.length, fresh });
-  return true;
 }
 
 async function main(): Promise<void> {
@@ -269,13 +269,18 @@ async function main(): Promise<void> {
   const specJson = specArg.startsWith('@')
     ? readFileSync(specArg.slice(1), 'utf8')
     : Buffer.from(specArg, 'base64url').toString('utf8');
-  const specs = JSON.parse(specJson) as CredentialBootstrapRunnerSpec[];
+  const payload = JSON.parse(specJson) as {
+    bootstraps: CredentialBootstrapRunnerSpec[];
+    lease: CredentialBootstrapLeaseSpec;
+  };
   installSignalCleanup();
   // The worker registers PTY listeners immediately after spawn. Leave a small
   // handshake window so a fast login command cannot print its URL before the
   // terminal observer is attached.
   await wait(750);
-  if (!await runCredentialBootstraps(specs)) process.exit(78);
+  const result = await runCredentialBootstraps(payload.bootstraps, payload.lease);
+  if (result === 'superseded') process.exit(79);
+  if (result === 'failed') process.exit(78);
   process.stdout.write('\n[botmux] 凭证初始化全部完成，正在启动 CLI。\n');
 
   const cli = spawn(cliBin, process.argv.slice(4), { stdio: 'inherit', detached: true });

@@ -77,12 +77,15 @@ import { ReadyGate, shouldArmReadyGate } from './utils/ready-gate.js';
 import { shouldRunStartupCommandsOnSpawn, shouldDeferInitialPromptForStartup } from './core/startup-commands.js';
 import { sanitizePerBotEnv } from './core/per-bot-env.js';
 import {
+  credentialBootstrapLeaseDirectory,
   ensureCredentialBindSources,
   resolveCredentialBindMounts,
   resolvePendingCredentialBootstraps,
 } from './core/owner.js';
+import { CREDENTIAL_BOOTSTRAP_LEASE_TARGET } from './core/credential-bootstrap-lease.js';
 import {
   credentialBootstrapLifecycle,
+  credentialBootstrapLeaseId,
   credentialBootstrapToolName as toolNameFromCredentialTrace,
   formatCredentialTrace,
 } from './core/credential-isolation-log.js';
@@ -1852,6 +1855,9 @@ let credentialBootstrapActive = false;
 let credentialBootstrapTail = '';
 let credentialBootstrapLoginUrl = '';
 let credentialBootstrapToolName = '当前工具';
+let credentialBootstrapActiveLeaseId = '';
+let credentialBootstrapClaimedLeaseId = '';
+let credentialBootstrapExitResult: 'failed' | 'superseded' | undefined;
 let credentialBootstrapSuccessMessage = '研发工具登录成功。';
 const credentialBootstrapToolNamesByMount = new Map<string, string>();
 const deliveredCredentialBootstrapLoginUrls = new Set<string>();
@@ -4975,10 +4981,13 @@ async function captureAndUpload(): Promise<void> {
 
 /** Render the login URL as a clean QR independently of terminal layout. */
 async function captureAndUploadCredentialBootstrapQr(loginUrl: string, toolName: string): Promise<void> {
-  if (!credentialBootstrapActive || apiOnlyForUpload) {
+  const leaseId = credentialBootstrapActiveLeaseId;
+  if (!credentialBootstrapActive || !leaseId || apiOnlyForUpload) {
     log(formatCredentialTrace('bootstrap.qr_capture_skipped', {
       sessionId, botId: larkAppIdForUpload, result: 'skipped',
-      reason: !credentialBootstrapActive ? 'bootstrap_not_active' : 'lark_transport_disabled',
+      reason: !credentialBootstrapActive
+        ? 'bootstrap_not_active'
+        : !leaseId ? 'lease_missing' : 'lark_transport_disabled',
     }));
     return;
   }
@@ -5022,6 +5031,7 @@ async function captureAndUploadCredentialBootstrapQr(loginUrl: string, toolName:
       imageKey,
       loginUrl,
       toolName,
+      leaseId,
       turnId: currentBotmuxTurnId,
       dispatchAttempt: currentBotmuxDispatchAttempt,
     });
@@ -6132,6 +6142,13 @@ function maybeNotifyCredentialBootstrapOutput(data: string): void {
     if (loggedCredentialBootstrapTraceLines.has(trimmed)) continue;
     loggedCredentialBootstrapTraceLines.add(trimmed);
     log(trimmed);
+    const parsedLeaseId = credentialBootstrapLeaseId(trimmed);
+    credentialBootstrapActiveLeaseId = parsedLeaseId ?? credentialBootstrapActiveLeaseId;
+    if (parsedLeaseId && parsedLeaseId !== credentialBootstrapClaimedLeaseId
+      && trimmed.includes('event=bootstrap.lease_published')) {
+      credentialBootstrapClaimedLeaseId = parsedLeaseId;
+      send({ type: 'credential_bootstrap_lease_claimed', leaseId: parsedLeaseId });
+    }
     if (!trimmed.startsWith('[owner-credential] event=bootstrap.')) continue;
     lifecycle = credentialBootstrapLifecycle(trimmed) ?? lifecycle;
     if (trimmed.includes('event=bootstrap.batch_completed') && trimmed.includes('fresh=true')) {
@@ -6139,10 +6156,11 @@ function maybeNotifyCredentialBootstrapOutput(data: string): void {
     }
     const mount = toolNameFromCredentialTrace(trimmed);
     if (mount) credentialBootstrapToolName = credentialBootstrapToolNamesByMount.get(mount) ?? mount;
-    if (mount && trimmed.includes('event=bootstrap.step_completed')) {
+    if (mount && credentialBootstrapActiveLeaseId && trimmed.includes('event=bootstrap.step_completed')) {
       send({
         type: 'credential_bootstrap_succeeded',
         message: `${credentialBootstrapToolName} 登录成功。`,
+        leaseId: credentialBootstrapActiveLeaseId,
         turnId: currentBotmuxTurnId,
         dispatchAttempt: currentBotmuxDispatchAttempt,
       });
@@ -6170,21 +6188,27 @@ function maybeNotifyCredentialBootstrapOutput(data: string): void {
       scheduleCredentialBootstrapQrCapture(loginUrl, credentialBootstrapToolName);
     }
   }
-  if (lifecycle === 'failed' || lifecycle === 'completed') {
+  if (lifecycle === 'failed' || lifecycle === 'completed' || lifecycle === 'superseded') {
     const completed = lifecycle === 'completed';
-    log(formatCredentialTrace(completed ? 'bootstrap.completed' : 'bootstrap.failed', {
+    const completedLeaseId = credentialBootstrapActiveLeaseId;
+    credentialBootstrapExitResult = lifecycle === 'superseded'
+      ? 'superseded'
+      : lifecycle === 'failed' ? 'failed' : undefined;
+    log(formatCredentialTrace(completed ? 'bootstrap.completed' : lifecycle === 'superseded' ? 'bootstrap.superseded' : 'bootstrap.failed', {
       sessionId,
       botId: larkAppIdForUpload,
       result: completed ? 'ready' : 'failed',
-      reason: completed ? undefined : 'login_incomplete_or_timeout',
+      reason: completed ? undefined : lifecycle === 'superseded' ? 'newer_session' : 'login_incomplete_or_timeout',
     }));
     // A failed bootstrap has no CLI behind it. Keep the ready gate closed until
     // the automatic respawn resets state and starts a fresh bootstrap attempt.
-    if (completed) credentialBootstrapActive = false;
-    if (completed && freshLoginCompleted) {
+    credentialBootstrapActive = false;
+    credentialBootstrapActiveLeaseId = '';
+    if (completed && freshLoginCompleted && completedLeaseId) {
       send({
         type: 'credential_bootstrap_succeeded',
         message: credentialBootstrapSuccessMessage,
+        leaseId: completedLeaseId,
         turnId: currentBotmuxTurnId,
         dispatchAttempt: currentBotmuxDispatchAttempt,
       });
@@ -7857,6 +7881,9 @@ async function spawnCli(
   credentialBootstrapTail = '';
   credentialBootstrapLoginUrl = '';
   credentialBootstrapToolName = '当前工具';
+  credentialBootstrapActiveLeaseId = '';
+  credentialBootstrapClaimedLeaseId = '';
+  credentialBootstrapExitResult = undefined;
   credentialBootstrapSuccessMessage = '研发工具登录成功。';
   credentialBootstrapToolNamesByMount.clear();
   deliveredCredentialBootstrapLoginUrls.clear();
@@ -9422,6 +9449,14 @@ async function spawnCli(
           credentialIsolation: cfg.credentialIsolation,
         }, sandboxHome, canonical(configuredBotmuxHome))
       : [];
+    const credentialBootstrapLeaseSource = ownerCredentialIsolation
+      ? credentialBootstrapLeaseDirectory(canonical(configuredBotmuxHome), cfg.credentialPrincipal!.ownerId)
+      : undefined;
+    const credentialBootstrapSessionCreatedAt = process.env.BOTMUX_SESSION_CREATED_AT;
+    if (ownerCredentialIsolation && (!credentialBootstrapSessionCreatedAt
+      || !Number.isFinite(Date.parse(credentialBootstrapSessionCreatedAt)))) {
+      throw new Error('credential bootstrap requires the durable session creation time');
+    }
     if (ownerCredentialIsolation) {
       log(formatCredentialTrace('mount.plan_ready', {
         sessionId: cfg.sessionId,
@@ -9445,6 +9480,13 @@ async function spawnCli(
     }
     try {
       ensureCredentialBindSources(credentialBindMounts);
+      if (credentialBootstrapLeaseSource) {
+        mkdirSync(credentialBootstrapLeaseSource, { recursive: true, mode: 0o700 });
+        const stat = lstatSync(credentialBootstrapLeaseSource);
+        if (!stat.isDirectory() || stat.isSymbolicLink()) {
+          throw new Error(`credential bootstrap lease source has wrong shape: ${credentialBootstrapLeaseSource}`);
+        }
+      }
     } catch (error) {
       log(formatCredentialTrace('mount.source_prepare_failed', {
         sessionId: cfg.sessionId,
@@ -9784,6 +9826,12 @@ async function spawnCli(
         cliBin: cliAdapter.resolvedBin,
         cliArgs: args,
         credentialBootstraps,
+        credentialBootstrapLease: credentialBootstraps.length && credentialBootstrapLeaseSource ? {
+          source: credentialBootstrapLeaseSource,
+          directory: CREDENTIAL_BOOTSTRAP_LEASE_TARGET,
+          sessionId: cfg.sessionId,
+          sessionCreatedAt: credentialBootstrapSessionCreatedAt!,
+        } : undefined,
         credentialJwtBridges,
         isolateCredentialEnv: ownerCredentialIsolation,
         trustedBotmuxCommandPaths: [defaultGatewayEntry().command],
@@ -10666,7 +10714,11 @@ async function spawnCli(
     if (intentionalRestart) {
       log('Suppressed claude_exit for intentional in-worker restart');
     } else {
-      send({ type: 'claude_exit', code, signal, logTail, canParkDiagnostic, turnId: exitedTurnId, dispatchAttempt: exitedDispatchAttempt });
+      send({
+        type: 'claude_exit', code, signal, logTail, canParkDiagnostic,
+        credentialBootstrapResult: credentialBootstrapExitResult,
+        turnId: exitedTurnId, dispatchAttempt: exitedDispatchAttempt,
+      });
     }
   });
 

@@ -18,7 +18,9 @@ to resolve an owner, establish bwrap, verify a mount, or complete bootstrap fail
 closed rather than exposing host credentials.
 
 Only the Credential Principal may drive the Agent CLI. Bootstrap is serialized
-per owner and mount, while normal Session access is shared. Botmux automatically
+per owner with a lease below `owners/<email-prefix>/.bootstrap/`, outside every
+tool-managed credential directory. The newest durable Session creation time wins;
+an older runner stops without restarting or publishing a stale login card. Normal Session access is shared. Botmux automatically
 starts missing login flows, pauses the first business turn, and publishes login
 links, device codes, QR screenshots, and status in the originating conversation.
 Anyone who can view the conversation may complete that login; the system

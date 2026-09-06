@@ -10,7 +10,7 @@
 import { describe, it, expect } from 'vitest';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { mkdtempSync, existsSync, writeFileSync, readFileSync, symlinkSync, realpathSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, existsSync, writeFileSync, readFileSync, symlinkSync, realpathSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { buildRelayHostEnv, validateRelayRequest, materializeOutboxFile, prepareDirectSandbox, coreOnlyPidNamespaceDegrade, bwrapCanUnsharePid, pidNsDualProbeCanUnshare, __testOnly_resetPidNamespaceProbe } from '../src/adapters/backend/sandbox.js';
 import { createCodexAppAdapter } from '../src/adapters/cli/codex-app.js';
@@ -148,6 +148,8 @@ describe('prepareDirectSandbox credential bootstrap wrapper', () => {
   it('runs bootstrap inside bwrap before the original CLI argv', () => {
     if (process.platform !== 'linux') return;
     const dir = tmp();
+    const leaseSource = join(dir, '.bootstrap');
+    mkdirSync(leaseSource);
     const r = prepareDirectSandbox({
       sessionId: 'credential-bootstrap', dataDir: tmp(),
       policy: { rules: [], net: true, writeRegexes: [] },
@@ -159,8 +161,11 @@ describe('prepareDirectSandbox credential bootstrap wrapper', () => {
         args: [],
         successPaths: ['/tmp/demo-ready'],
         timeoutSeconds: 30,
-        lockPath: '/tmp/demo.lock',
       }],
+      credentialBootstrapLease: {
+        source: leaseSource, directory: '/run/botmux-owner-bootstrap',
+        sessionId: 'credential-bootstrap', sessionCreatedAt: '2026-09-06T11:25:00.000Z',
+      },
     });
     if (!r) return;
     const dashDash = r.args.lastIndexOf('--');
@@ -168,7 +173,8 @@ describe('prepareDirectSandbox credential bootstrap wrapper', () => {
     expect(r.args[dashDash + 2]).toContain('credential-bootstrap-runner.js');
     expect(r.args[dashDash + 3]).toBe('@/run/sbxbin/credential-bootstraps.json');
     const specFile = join(r.outbox, '..', 'shimbin', 'credential-bootstraps.json');
-    expect(JSON.parse(readFileSync(specFile, 'utf8'))[0]).toMatchObject({ id: 'demo' });
+    expect(JSON.parse(readFileSync(specFile, 'utf8')).bootstraps[0]).toMatchObject({ id: 'demo' });
+    expect(r.args).toContain('/run/botmux-owner-bootstrap');
     expect(r.args[dashDash + 4]).toBe('/usr/bin/true');
     expect(r.args[dashDash + 5]).toBe('--version');
     r.cleanup();
@@ -239,6 +245,8 @@ describe('prepareDirectSandbox credential bootstrap wrapper', () => {
     if (process.platform !== 'linux') return;
     const dataDir = tmp();
     const dir = tmp();
+    const leaseSource = join(dir, '.bootstrap');
+    mkdirSync(leaseSource);
     const r = prepareDirectSandbox({
       sessionId: 'devflow-bootstrap', dataDir,
       policy: { rules: [], net: true, writeRegexes: [] },
@@ -247,8 +255,11 @@ describe('prepareDirectSandbox credential bootstrap wrapper', () => {
         id: 'devflow-auth', command: '/usr/bin/true', args: ['auth', 'update'],
         executableName: 'devflow-cli',
         successPaths: [join(dir, 'cloud_jwt_token.txt')], timeoutSeconds: 30,
-        lockPath: join(dir, 'devflow.lock'),
       }],
+      credentialBootstrapLease: {
+        source: leaseSource, directory: '/run/botmux-owner-bootstrap',
+        sessionId: 'devflow-bootstrap', sessionCreatedAt: '2026-09-06T11:25:00.000Z',
+      },
     });
     if (!r) return;
     const shim = join(dataDir, 'sandboxes', 'devflow-bootstrap', 'shimbin', 'devflow-cli');

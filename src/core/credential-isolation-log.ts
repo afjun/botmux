@@ -24,6 +24,7 @@ export interface CredentialTraceFields {
   fresh?: boolean;
   attempt?: number;
   pid?: number;
+  leaseId?: string;
 }
 
 const FIELD_ORDER: ReadonlyArray<keyof CredentialTraceFields> = [
@@ -52,6 +53,7 @@ const FIELD_ORDER: ReadonlyArray<keyof CredentialTraceFields> = [
   'fresh',
   'attempt',
   'pid',
+  'leaseId',
 ];
 
 const FIELD_NAMES: Record<keyof CredentialTraceFields, string> = {
@@ -80,6 +82,7 @@ const FIELD_NAMES: Record<keyof CredentialTraceFields, string> = {
   fresh: 'fresh',
   attempt: 'attempt',
   pid: 'pid',
+  leaseId: 'lease',
 };
 
 /** Keep enough identity for correlation while avoiding full Open IDs in logs. */
@@ -118,7 +121,7 @@ export function formatCredentialTrace(event: string, fields: CredentialTraceFiel
   return parts.join(' ');
 }
 
-export type CredentialBootstrapLifecycle = 'started' | 'completed' | 'failed';
+export type CredentialBootstrapLifecycle = 'started' | 'completed' | 'failed' | 'superseded';
 
 /** Read lifecycle only from runner-owned structured records. Login TUI output
  * is repeatedly redrawn, so user-facing text is not a reliable state signal. */
@@ -126,9 +129,15 @@ export function credentialBootstrapLifecycle(line: string): CredentialBootstrapL
   if (!line.startsWith('[owner-credential] event=bootstrap.')) return undefined;
   if (line.includes('event=bootstrap.batch_started')) return 'started';
   if (line.includes('event=bootstrap.batch_completed')) return 'completed';
+  if (line.includes('event=bootstrap.batch_superseded') || line.includes('event=bootstrap.superseded')) return 'superseded';
   if (line.includes('event=bootstrap.lock_timeout')
     || (line.includes('event=bootstrap.validation_finished') && line.includes('result=failed'))) return 'failed';
   return undefined;
+}
+
+export function credentialBootstrapLeaseId(line: string): string | undefined {
+  if (!line.startsWith('[owner-credential] event=bootstrap.')) return undefined;
+  return line.match(/\blease=([0-9a-f-]{36})\b/)?.[1];
 }
 
 export function credentialBootstrapToolName(line: string): string | undefined {

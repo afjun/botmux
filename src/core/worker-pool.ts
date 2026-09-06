@@ -68,6 +68,14 @@ import { isSuspendableBackendType, getSessionPersistentBackendType, persistentBa
 import { getBot, getAllBots, loadBotConfigs, resolveBrandLabel, getLoadedConfigPath, resolveUsageDisplay } from '../bot-registry.js';
 import { RestartCoordinator, type RestartObserver } from './restart-coordinator.js';
 import { formatCredentialTrace } from './credential-isolation-log.js';
+import { credentialBootstrapLeaseDirectory } from './owner.js';
+import {
+  activeCredentialBootstrapLeases,
+  credentialBootstrapLeaseProcessAlive,
+  currentCredentialBootstrapLease,
+  removeCredentialBootstrapLease,
+  signalCredentialBootstrapLeaseProcess,
+} from './credential-bootstrap-lease.js';
 import { runtimeBuildIdentity } from '../utils/runtime-build-id.js';
 
 /** A random id minted once per daemon process (this lifetime). Stamped onto
@@ -77,6 +85,63 @@ const DAEMON_BOOT_ID = randomUUID();
 const restartCoordinator = new RestartCoordinator();
 const lifecycleRetiringWorkers = new WeakMap<DaemonSession, Set<ChildProcess>>();
 const transferRetiringWorkers = new WeakSet<ChildProcess>();
+const credentialBootstrapAuthorities = new Map<string, {
+  leaseId: string;
+  sessionId: string;
+  sessionCreatedAt: string;
+}>();
+
+function credentialBootstrapLeaseDir(ds: DaemonSession): string | undefined {
+  const principal = ds.session.credentialPrincipal;
+  if (!principal) return undefined;
+  let botmuxHome = dirname(config.session.dataDir);
+  try { botmuxHome = realpathSync(botmuxHome); } catch { /* use configured path */ }
+  return credentialBootstrapLeaseDirectory(botmuxHome, principal.ownerId);
+}
+
+function credentialBootstrapLeaseMatches(ds: DaemonSession, leaseId: string, allowCompleted = false): boolean {
+  const principal = ds.session.credentialPrincipal;
+  const directory = credentialBootstrapLeaseDir(ds);
+  const current = directory ? currentCredentialBootstrapLease(directory) : undefined;
+  const expected = current ?? (allowCompleted && principal
+    ? credentialBootstrapAuthorities.get(principal.ownerId)
+    : undefined);
+  return !!expected && expected.leaseId === leaseId
+    && expected.sessionId === ds.session.sessionId
+    && expected.sessionCreatedAt === ds.session.createdAt;
+}
+
+function preemptOlderCredentialBootstrapLeases(ds: DaemonSession, leaseId: string): void {
+  const principal = ds.session.credentialPrincipal;
+  const directory = credentialBootstrapLeaseDir(ds);
+  if (!principal || !directory || !credentialBootstrapLeaseMatches(ds, leaseId)) return;
+  const current = currentCredentialBootstrapLease(directory)!;
+  credentialBootstrapAuthorities.set(principal.ownerId, current);
+  for (const older of activeCredentialBootstrapLeases(directory)) {
+    if (older.leaseId === leaseId) continue;
+    const signaled = signalCredentialBootstrapLeaseProcess(older, 'SIGTERM');
+    logger.info(formatCredentialTrace('bootstrap.lease_preempted', {
+      sessionId: older.sessionId,
+      botId: ds.larkAppId,
+      ownerId: principal.ownerId,
+      result: signaled ? 'sigterm_sent' : 'process_not_verified',
+      leaseId: older.leaseId,
+      pid: older.runnerPid,
+    }));
+    const finish = setTimeout(() => {
+      if (credentialBootstrapLeaseProcessAlive(older)) {
+        signalCredentialBootstrapLeaseProcess(older, 'SIGKILL');
+      }
+      const cleanup = setTimeout(() => {
+        if (!credentialBootstrapLeaseProcessAlive(older)) {
+          removeCredentialBootstrapLease(directory, older);
+        }
+      }, 100);
+      cleanup.unref();
+    }, 2_000);
+    finish.unref();
+  }
+}
 
 function trackLifecycleRetirement(ds: DaemonSession, worker: ChildProcess): void {
   let workers = lifecycleRetiringWorkers.get(ds);
@@ -4306,6 +4371,7 @@ export function forkWorker(
       BOTMUX: '1',  // Marker so user scripts/skills can detect a botmux-spawned CLI
       SESSION_DATA_DIR: config.session.dataDir,
       BOTMUX_SESSION_ID: ds.session.sessionId,
+      BOTMUX_SESSION_CREATED_AT: ds.session.createdAt,
       LARK_APP_ID: botCfg.larkAppId,
       // Withhold the real secret from the worker's own CLI env for a no-transport
       // session (apiOnly bot or HTTP virtual chat). SEPARATE leak from the
@@ -5616,6 +5682,11 @@ function setupWorkerHandlers(
         break;
       }
 
+      case 'credential_bootstrap_lease_claimed': {
+        preemptOlderCredentialBootstrapLeases(ds, msg.leaseId);
+        break;
+      }
+
       case 'credential_bootstrap_qr': {
         if (managedAuxUiSuppressed(msg.turnId, msg.dispatchAttempt)) {
           logger.info(formatCredentialTrace('bootstrap.qr_delivery_skipped', {
@@ -5627,13 +5698,36 @@ function setupWorkerHandlers(
           }));
           break;
         }
+        const principal = ds.session.credentialPrincipal;
+        if (!principal || !credentialBootstrapLeaseMatches(ds, msg.leaseId)) {
+          logger.info(formatCredentialTrace('bootstrap.qr_delivery_skipped', {
+            sessionId: ds.session.sessionId,
+            botId: ds.larkAppId,
+            ownerId: principal?.ownerId,
+            result: 'skipped',
+            reason: 'stale_lease',
+            leaseId: msg.leaseId,
+          }));
+          break;
+        }
+        const ownerOpenId = /^ou_[A-Za-z0-9_-]+$/.test(principal.openId) ? principal.openId : undefined;
+        if (!ownerOpenId) {
+          logger.warn(formatCredentialTrace('bootstrap.qr_delivery_skipped', {
+            sessionId: ds.session.sessionId,
+            botId: ds.larkAppId,
+            ownerId: principal.ownerId,
+            result: 'skipped',
+            reason: 'owner_open_id_invalid',
+          }));
+          break;
+        }
         try {
           const cardJson = JSON.stringify({
             config: { wide_screen_mode: true },
             elements: [
               {
                 tag: 'div',
-                text: { tag: 'plain_text', content: `请扫码登录 ${msg.toolName}` },
+                text: { tag: 'lark_md', content: `<at id="${ownerOpenId}"></at> 请扫码登录 ${msg.toolName}` },
               },
               {
                 tag: 'column_set',
@@ -5703,6 +5797,17 @@ function setupWorkerHandlers(
 
       case 'credential_bootstrap_succeeded': {
         if (managedAuxUiSuppressed(msg.turnId, msg.dispatchAttempt)) break;
+        if (!credentialBootstrapLeaseMatches(ds, msg.leaseId, true)) {
+          logger.info(formatCredentialTrace('bootstrap.success_delivery_skipped', {
+            sessionId: ds.session.sessionId,
+            botId: ds.larkAppId,
+            ownerId: ds.session.credentialPrincipal?.ownerId,
+            result: 'skipped',
+            reason: 'stale_lease',
+            leaseId: msg.leaseId,
+          }));
+          break;
+        }
         try {
           await scopedReply(msg.message, 'text', msg.turnId);
           logger.info(formatCredentialTrace('bootstrap.success_delivered', {
@@ -6106,11 +6211,29 @@ function setupWorkerHandlers(
           break;
         }
 
+        // Exit 79 means a newer Session for the same owner took over login.
+        // The old topic stays quiet and requires an explicit /restart.
+        if (msg.credentialBootstrapResult === 'superseded' && ds.session.credentialIsolation) {
+          logger.info(formatCredentialTrace('bootstrap.worker_exit', {
+            sessionId: ds.session.sessionId,
+            botId: ds.larkAppId,
+            ownerId: ds.session.credentialPrincipal?.ownerId,
+            backend: ds.session.backendType,
+            result: 'superseded',
+            reason: 'runner_exit_79',
+          }));
+          restartCounts.delete(ds.session.sessionId);
+          killWorker(ds);
+          ds.lastScreenStatus = 'idle';
+          clearUsageRefreshTimer(ds);
+          break;
+        }
+
         // Exit 78 is reserved by credential-bootstrap-runner for an
         // incomplete/failed login. An automatic restart would repeatedly
         // launch an interactive auth flow and can spam links/device codes.
         // Preserve the session, but require an explicit /restart retry.
-        if (msg.code === 78 && ds.session.credentialIsolation) {
+        if (msg.credentialBootstrapResult === 'failed' && ds.session.credentialIsolation) {
           logger.warn(formatCredentialTrace('bootstrap.worker_exit', {
             sessionId: ds.session.sessionId,
             botId: ds.larkAppId,
