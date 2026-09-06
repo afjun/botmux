@@ -272,7 +272,7 @@ import { processStuckWarningTuiKeys, shouldRearmStuckDetector } from './utils/st
 import { sendTuiKeySequence, submitTuiTextInput } from './utils/tui-input-delivery.js';
 import { captureToPng } from './utils/screenshot-renderer.js';
 import { snapshotToPng, snapshotToText, shouldCaptureScreen, isScreenSelfDriven } from './utils/transient-snapshot.js';
-import { extractLoginUrls, renderQrCodePng } from './utils/qr-code.js';
+import { extractCredentialBootstrapLoginUrls, renderQrCodePng } from './utils/qr-code.js';
 import { chooseWebTerminalSeed } from './utils/web-terminal-seed.js';
 import {
   mergeHerdrWebSnapshot,
@@ -6161,7 +6161,7 @@ function maybeNotifyCredentialBootstrapOutput(data: string): void {
   }
   if (!credentialBootstrapActive) return;
 
-  for (const loginUrl of extractLoginUrls(credentialBootstrapTail)) {
+  for (const loginUrl of extractCredentialBootstrapLoginUrls(credentialBootstrapTail)) {
     if (loginUrl !== credentialBootstrapLoginUrl) {
       credentialBootstrapLoginUrl = loginUrl;
       log(formatCredentialTrace('bootstrap.affordance_detected', {

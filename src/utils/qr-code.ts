@@ -13,6 +13,13 @@ export function extractLoginUrls(text: string): string[] {
     .map(match => match[0].replace(/[),.;]+$/, ''));
 }
 
+/** Ignore URLs printed by readiness checks before the active login command. */
+export function extractCredentialBootstrapLoginUrls(text: string): string[] {
+  const marker = 'event=bootstrap.command_started';
+  const markerOffset = text.lastIndexOf(marker);
+  return markerOffset < 0 ? [] : extractLoginUrls(text.slice(markerOffset + marker.length));
+}
+
 /** Render a URL as a crisp, scanner-friendly QR PNG. */
 export function renderQrCodePng(value: string): Buffer {
   if (!value) throw new Error('QR code value is required');
