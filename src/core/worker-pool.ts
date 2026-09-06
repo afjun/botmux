@@ -48,6 +48,7 @@ import { findUniqueClaudeSessionByCwd } from './session-discovery.js';
 import {
   buildMarkdownCard,
   buildContextualReplyCard,
+  buildReplyCardFooter,
   type CardUsageSnapshot,
   type LocalHomeLinkMode,
 } from '../im/lark/md-card.js';
@@ -5722,12 +5723,19 @@ function setupWorkerHandlers(
           break;
         }
         try {
+          const locale = localeForBot(ds.larkAppId);
+          const footer = buildReplyCardFooter({
+            brand: renderBrandTemplate(resolveBrandLabel(ds.larkAppId), ds.workingDir),
+            recipientOpenIds: [ownerOpenId],
+            locale,
+          });
           const cardJson = JSON.stringify({
-            config: { wide_screen_mode: true },
-            elements: [
+            schema: '2.0',
+            config: { update_multi: true, wide_screen_mode: true },
+            body: { direction: 'vertical', elements: [
               {
-                tag: 'div',
-                text: { tag: 'lark_md', content: `<at id="${ownerOpenId}"></at> 请扫码登录 ${msg.toolName}` },
+                tag: 'markdown',
+                content: `请扫码登录 ${msg.toolName}`,
               },
               {
                 tag: 'column_set',
@@ -5755,25 +5763,34 @@ function setupWorkerHandlers(
                   },
                   {
                     tag: 'column', width: 'weighted', weight: 6, vertical_align: 'center',
-                    elements: [{ tag: 'div', text: { tag: 'plain_text', content: ' ' } }],
+                    elements: [{ tag: 'markdown', content: ' ' }],
                   },
                 ],
               },
               {
-                tag: 'action',
-                actions: [{
-                  tag: 'button',
-                  text: { tag: 'plain_text', content: '打开登录链接' },
-                  type: 'primary',
-                  multi_url: {
-                    url: msg.loginUrl,
-                    pc_url: msg.loginUrl,
-                    android_url: msg.loginUrl,
-                    ios_url: msg.loginUrl,
-                  },
+                tag: 'column_set',
+                flex_mode: 'none',
+                columns: [{
+                  tag: 'column', width: 'weighted', weight: 1,
+                  elements: [{
+                    tag: 'button',
+                    text: { tag: 'plain_text', content: '打开登录链接' },
+                    type: 'primary',
+                    behaviors: [{
+                      type: 'open_url',
+                      default_url: msg.loginUrl,
+                      pc_url: msg.loginUrl,
+                      android_url: msg.loginUrl,
+                      ios_url: msg.loginUrl,
+                    }],
+                  }],
                 }],
               },
-            ],
+              ...(footer ? [
+                { tag: 'hr' },
+                footer.element,
+              ] : []),
+            ] },
           });
           await scopedReply(cardJson, 'interactive', msg.turnId);
           logger.info(formatCredentialTrace('bootstrap.qr_delivered', {

@@ -56,6 +56,7 @@ vi.mock('../src/bot-registry.js', () => ({
     botName: 'TestBot',
   })),
   getAllBots: vi.fn(() => []),
+  resolveBrandLabel: vi.fn(() => 'EventBus'),
 }));
 
 vi.mock('../src/config.js', () => ({
@@ -357,11 +358,12 @@ describe('worker-pool lifecycle hook integration', () => {
     const [, content, msgType] = sessionReply.mock.calls[0];
     expect(msgType).toBe('interactive');
     const card = JSON.parse(content);
-    expect(card.elements[0]).toMatchObject({
-      tag: 'div',
-      text: { tag: 'lark_md', content: '<at id="ou_owner"></at> 请扫码登录 bytedcli' },
+    expect(card).toMatchObject({ schema: '2.0', body: { direction: 'vertical' } });
+    expect(card.body.elements[0]).toMatchObject({
+      tag: 'markdown',
+      content: '请扫码登录 bytedcli',
     });
-    expect(card.elements[1]).toMatchObject({
+    expect(card.body.elements[1]).toMatchObject({
       tag: 'column_set',
       columns: [
         {
@@ -373,12 +375,28 @@ describe('worker-pool lifecycle hook integration', () => {
             elements: [{ tag: 'img', img_key: 'img_owner_login' }],
           }],
         },
-        { width: 'weighted', weight: 6 },
+        {
+          width: 'weighted',
+          weight: 6,
+          elements: [{ tag: 'markdown', content: ' ' }],
+        },
       ],
     });
-    expect(card.elements[2]).toMatchObject({
-      tag: 'action',
-      actions: [{ multi_url: { url: 'https://login.example.com/device' } }],
+    expect(card.body.elements[2]).toMatchObject({
+      tag: 'column_set',
+      columns: [{
+        elements: [{
+          tag: 'button',
+          behaviors: [{ type: 'open_url', default_url: 'https://login.example.com/device' }],
+        }],
+      }],
+    });
+    expect(card.body.elements[3]).toEqual({ tag: 'hr' });
+    expect(card.body.elements[4]).toMatchObject({
+      tag: 'markdown',
+      element_id: 'botmux_reply_footer',
+      text_size: 'notation_small_v2',
+      content: expect.stringMatching(/EventBus.*发送给：<at id=ou_owner><\/at>/),
     });
   });
 
