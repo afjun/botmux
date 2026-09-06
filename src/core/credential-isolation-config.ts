@@ -15,6 +15,8 @@ export interface CredentialCommandConfig {
 }
 
 export interface CredentialBootstrapConfig extends CredentialCommandConfig {
+  /** Stable step name used by logs, locks and login cards. Required in a sequence. */
+  id?: string;
   /** Paths relative to `~/.botmux/owners/<owner>/` that must exist after login. */
   successPaths: string[];
   checkCommand?: CredentialCommandConfig;
@@ -29,7 +31,7 @@ export interface CredentialMountConfig {
   target: string;
   /** Relative path below `~/.botmux/owners/<owner>/`. */
   ownerSubdir: string;
-  bootstrap?: CredentialBootstrapConfig;
+  bootstrap?: CredentialBootstrapConfig | CredentialBootstrapConfig[];
 }
 
 export interface CredentialIsolationConfig {
@@ -58,13 +60,21 @@ export const BUILTIN_CREDENTIAL_MOUNTS: Readonly<Record<CredentialIsolationPrese
     kind: 'directory',
     target: '~/.local/share/bytedcli',
     ownerSubdir: 'bytedcli',
-    bootstrap: {
+    bootstrap: [{
+      id: 'bytedcli',
       command: 'bytedcli',
       args: ['auth', 'login'],
       successPaths: ['bytedcli/data/userinfo.json'],
       checkCommand: { command: 'bytedcli', args: ['--json', 'auth', 'status'] },
       timeoutSeconds: CREDENTIAL_BOOTSTRAP_DEFAULT_TIMEOUT_SECONDS,
-    },
+    }, {
+      id: 'meego',
+      command: 'bytedcli',
+      args: ['meego', 'login', '--max-wait-ms', '600000', '--no-terminal-qr'],
+      successPaths: ['bytedcli/data/meego_auth.json'],
+      checkCommand: { command: 'bytedcli', args: ['--json', 'meego', 'user', 'me'] },
+      timeoutSeconds: CREDENTIAL_BOOTSTRAP_DEFAULT_TIMEOUT_SECONDS,
+    }],
   }],
   bytecloud: [{
     id: 'bytecloud',
@@ -123,16 +133,19 @@ function rejectUnknownKeys(raw: Record<string, unknown>, allowed: readonly strin
 }
 
 export function cloneCredentialMount(mount: CredentialMountConfig): CredentialMountConfig {
+  const cloneBootstrap = (bootstrap: CredentialBootstrapConfig): CredentialBootstrapConfig => ({
+    ...bootstrap,
+    args: [...bootstrap.args],
+    successPaths: [...bootstrap.successPaths],
+    checkCommand: bootstrap.checkCommand
+      ? { ...bootstrap.checkCommand, args: [...bootstrap.checkCommand.args] }
+      : undefined,
+  });
   return {
     ...mount,
-    bootstrap: mount.bootstrap ? {
-      ...mount.bootstrap,
-      args: [...mount.bootstrap.args],
-      successPaths: [...mount.bootstrap.successPaths],
-      checkCommand: mount.bootstrap.checkCommand
-        ? { ...mount.bootstrap.checkCommand, args: [...mount.bootstrap.checkCommand.args] }
-        : undefined,
-    } : undefined,
+    bootstrap: Array.isArray(mount.bootstrap)
+      ? mount.bootstrap.map(cloneBootstrap)
+      : mount.bootstrap ? cloneBootstrap(mount.bootstrap) : undefined,
   };
 }
 
@@ -225,7 +238,7 @@ function normalizeCommand(raw: unknown, path: string): CredentialCommandConfig {
 
 function normalizeBootstrap(raw: unknown, path: string): CredentialBootstrapConfig {
   if (!isObject(raw)) invalid(path, 'must be an object');
-  rejectUnknownKeys(raw, ['command', 'args', 'successPaths', 'checkCommand', 'timeoutSeconds'], path);
+  rejectUnknownKeys(raw, ['id', 'command', 'args', 'successPaths', 'checkCommand', 'timeoutSeconds'], path);
   const command = normalizeCommand({ command: raw.command, args: raw.args }, path);
   const object = raw as Record<string, unknown>;
   const timeout = object.timeoutSeconds ?? CREDENTIAL_BOOTSTRAP_DEFAULT_TIMEOUT_SECONDS;
@@ -237,6 +250,7 @@ function normalizeBootstrap(raw: unknown, path: string): CredentialBootstrapConf
   const successPaths = normalizeStringArray(object.successPaths, `${path}.successPaths`, false)
     .map((item, index) => normalizeRelativePath(item, `${path}.successPaths[${index}]`));
   return {
+    id: object.id === undefined ? undefined : normalizeId(object.id, `${path}.id`),
     ...command,
     successPaths,
     checkCommand: object.checkCommand === undefined
@@ -244,6 +258,20 @@ function normalizeBootstrap(raw: unknown, path: string): CredentialBootstrapConf
       : normalizeCommand(object.checkCommand, `${path}.checkCommand`),
     timeoutSeconds: timeout,
   };
+}
+
+function normalizeBootstrapSequence(raw: unknown, path: string): CredentialMountConfig['bootstrap'] {
+  if (!Array.isArray(raw)) return normalizeBootstrap(raw, path);
+  if (raw.length === 0) invalid(path, 'must be a non-empty array');
+  const bootstraps = raw.map((item, index) => normalizeBootstrap(item, `${path}[${index}]`));
+  const ids = new Set<string>();
+  for (let index = 0; index < bootstraps.length; index++) {
+    const id = bootstraps[index].id;
+    if (!id) invalid(`${path}[${index}].id`, 'is required for an ordered bootstrap sequence');
+    if (ids.has(id)) invalid(`${path}[${index}].id`, 'must be unique within the bootstrap sequence');
+    ids.add(id);
+  }
+  return bootstraps;
 }
 
 function normalizeMount(raw: MutableMount, base: CredentialMountConfig | undefined, path: string, options: NormalizeCredentialIsolationOptions): CredentialMountConfig {
@@ -255,7 +283,7 @@ function normalizeMount(raw: MutableMount, base: CredentialMountConfig | undefin
     ? base?.bootstrap && cloneCredentialMount(base).bootstrap
     : raw.bootstrap === null
       ? undefined
-      : normalizeBootstrap(raw.bootstrap, `${path}.bootstrap`);
+      : normalizeBootstrapSequence(raw.bootstrap, `${path}.bootstrap`);
   if (kind === 'file' && bootstrap) {
     invalid(`${path}.bootstrap`, 'is supported only for directory mounts');
   }

@@ -6,6 +6,7 @@ import { formatCredentialTrace, type CredentialTraceFields } from './credential-
 
 export interface CredentialBootstrapRunnerSpec {
   id: string;
+  displayName?: string;
   executableName: string;
   command: string;
   args: string[];
@@ -167,6 +168,7 @@ export async function runCredentialBootstraps(specs: readonly CredentialBootstra
   trace('bootstrap.batch_started', { result: 'started', count: specs.length });
   let fresh = false;
   for (const spec of specs) {
+    const displayName = spec.displayName ?? spec.id;
     if (await bootstrapReady(spec)) {
       trace('bootstrap.skipped', {
         mountId: spec.id,
@@ -186,7 +188,7 @@ export async function runCredentialBootstraps(specs: readonly CredentialBootstra
     });
     const lock = await acquireOrWait(spec);
     if (lock === 'timeout') {
-      process.stdout.write(`\n[botmux] 凭证初始化等待超时：${spec.id}。请使用 /restart 重试。\n`);
+      process.stdout.write(`\n[botmux] 凭证初始化等待超时：${displayName}。请使用 /restart 重试。\n`);
       return false;
     }
     try {
@@ -202,7 +204,7 @@ export async function runCredentialBootstraps(specs: readonly CredentialBootstra
         });
         continue;
       }
-      process.stdout.write(`\n[botmux] 正在初始化 ${spec.id} 登录。登录链接、设备码或二维码会显示在此终端。\n`);
+      process.stdout.write(`\n[botmux] 正在初始化 ${displayName} 登录。登录链接、设备码或二维码会显示在此终端。\n`);
       trace('bootstrap.command_started', {
         mountId: spec.id,
         result: 'started',
@@ -232,11 +234,16 @@ export async function runCredentialBootstraps(specs: readonly CredentialBootstra
         signal: failedCommand?.signal,
       });
       if (!checkOk) {
-        process.stdout.write(`\n[botmux] ${spec.id} 登录未完成或校验失败。请使用 /restart 重试。\n`);
+        process.stdout.write(`\n[botmux] ${displayName} 登录未完成或校验失败。请使用 /restart 重试。\n`);
         return false;
       }
       fresh = true;
-      process.stdout.write(`\n[botmux] ${spec.id} 登录完成。\n`);
+      trace('bootstrap.step_completed', {
+        mountId: spec.id,
+        result: 'ready',
+        fresh: true,
+      });
+      process.stdout.write(`\n[botmux] ${displayName} 登录完成。\n`);
     } finally {
       const heartbeat = lockHeartbeats.get(spec.lockPath);
       if (heartbeat) clearInterval(heartbeat);

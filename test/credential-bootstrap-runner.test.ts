@@ -78,6 +78,29 @@ describe('credential bootstrap runner', () => {
     writeSpy.mockRestore();
   });
 
+  it('reports each completed login before starting the next dependency', async () => {
+    const writeSpy = vi.spyOn(process.stdout, 'write');
+    const dir = tmp();
+    const firstReady = join(dir, 'first-ready');
+    const secondReady = join(dir, 'second-ready');
+
+    await expect(runCredentialBootstraps([{
+      id: 'bytedcli', executableName: 'bytedcli', command: '/usr/bin/touch', args: [firstReady],
+      successPaths: [firstReady], timeoutSeconds: 30, lockPath: join(dir, 'first-lock'),
+    }, {
+      id: 'bytedcli~meego', displayName: 'meego', executableName: 'bytedcli',
+      command: '/usr/bin/touch', args: [secondReady],
+      successPaths: [secondReady], timeoutSeconds: 30, lockPath: join(dir, 'second-lock'),
+    }])).resolves.toBe(true);
+
+    const trace = writeSpy.mock.calls.flat().join('');
+    expect(trace.indexOf('event=bootstrap.step_completed mount=bytedcli'))
+      .toBeLessThan(trace.indexOf('event=bootstrap.required mount=bytedcli~meego'));
+    expect(trace).toContain('[botmux] 正在初始化 meego 登录');
+    expect(trace).not.toContain('[botmux] 正在初始化 bytedcli~meego 登录');
+    writeSpy.mockRestore();
+  });
+
   it('distinguishes a command spawn failure without logging the command', async () => {
     const writeSpy = vi.spyOn(process.stdout, 'write');
     const dir = tmp();

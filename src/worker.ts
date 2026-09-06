@@ -4974,7 +4974,7 @@ async function captureAndUpload(): Promise<void> {
 }
 
 /** Render the login URL as a clean QR independently of terminal layout. */
-async function captureAndUploadCredentialBootstrapQr(): Promise<void> {
+async function captureAndUploadCredentialBootstrapQr(loginUrl: string, toolName: string): Promise<void> {
   if (!credentialBootstrapActive || apiOnlyForUpload) {
     log(formatCredentialTrace('bootstrap.qr_capture_skipped', {
       sessionId, botId: larkAppIdForUpload, result: 'skipped',
@@ -4988,7 +4988,6 @@ async function captureAndUploadCredentialBootstrapQr(): Promise<void> {
     }));
     return;
   }
-  const loginUrl = credentialBootstrapLoginUrl;
   if (!loginUrl || deliveredCredentialBootstrapLoginUrls.has(loginUrl)) {
     log(formatCredentialTrace('bootstrap.qr_capture_skipped', {
       sessionId, botId: larkAppIdForUpload, result: 'skipped',
@@ -5022,7 +5021,7 @@ async function captureAndUploadCredentialBootstrapQr(): Promise<void> {
       type: 'credential_bootstrap_qr',
       imageKey,
       loginUrl,
-      toolName: credentialBootstrapToolName,
+      toolName,
       turnId: currentBotmuxTurnId,
       dispatchAttempt: currentBotmuxDispatchAttempt,
     });
@@ -5038,11 +5037,11 @@ async function captureAndUploadCredentialBootstrapQr(): Promise<void> {
   }
 }
 
-function scheduleCredentialBootstrapQrCapture(): void {
-  if (credentialBootstrapQrTimer) return;
+function scheduleCredentialBootstrapQrCapture(loginUrl: string, toolName: string): void {
+  if (credentialBootstrapQrTimer) clearTimeout(credentialBootstrapQrTimer);
   credentialBootstrapQrTimer = setTimeout(() => {
     credentialBootstrapQrTimer = null;
-    void captureAndUploadCredentialBootstrapQr();
+    void captureAndUploadCredentialBootstrapQr(loginUrl, toolName);
   }, 700);
   log(formatCredentialTrace('bootstrap.qr_capture_scheduled', {
     sessionId, botId: larkAppIdForUpload, result: 'scheduled',
@@ -6140,6 +6139,17 @@ function maybeNotifyCredentialBootstrapOutput(data: string): void {
     }
     const mount = toolNameFromCredentialTrace(trimmed);
     if (mount) credentialBootstrapToolName = credentialBootstrapToolNamesByMount.get(mount) ?? mount;
+    if (mount && trimmed.includes('event=bootstrap.step_completed')) {
+      send({
+        type: 'credential_bootstrap_succeeded',
+        message: `${credentialBootstrapToolName} 登录成功。`,
+        turnId: currentBotmuxTurnId,
+        dispatchAttempt: currentBotmuxDispatchAttempt,
+      });
+      log(formatCredentialTrace('bootstrap.step_success_sent', {
+        sessionId, botId: larkAppIdForUpload, mountId: mount, result: 'sent_to_daemon',
+      }));
+    }
   }
   if (lifecycle === 'started') {
     if (!credentialBootstrapActive) {
@@ -6157,7 +6167,7 @@ function maybeNotifyCredentialBootstrapOutput(data: string): void {
       log(formatCredentialTrace('bootstrap.affordance_detected', {
         sessionId, botId: larkAppIdForUpload, result: 'login_url',
       }));
-      scheduleCredentialBootstrapQrCapture();
+      scheduleCredentialBootstrapQrCapture(loginUrl, credentialBootstrapToolName);
     }
   }
   if (lifecycle === 'failed' || lifecycle === 'completed') {
@@ -9490,12 +9500,12 @@ async function spawnCli(
             if (!command) throw new Error(`credential bridge command is not executable: ${executableName}`);
             return { executableName, command, bytedcliCommand };
           });
-          credentialBootstrapSuccessMessage = `研发工具登录成功：bytedcli 已完成认证，${bridgeTargets.join('、')} 将自动复用同一身份。`;
-        } else {
-          credentialBootstrapSuccessMessage = 'bytedcli 登录成功。';
         }
+        credentialBootstrapSuccessMessage = bridgeTargets.length
+          ? `凭证初始化完成：${bridgeTargets.join('、')} 将自动复用 bytedcli 身份。`
+          : '凭证初始化完成，正在启动会话。';
         for (const spec of credentialBootstraps) {
-          credentialBootstrapToolNamesByMount.set(spec.id, spec.executableName);
+          credentialBootstrapToolNamesByMount.set(spec.id, spec.displayName ?? spec.executableName);
         }
       } catch (error) {
         log(formatCredentialTrace('bootstrap.plan_failed', {

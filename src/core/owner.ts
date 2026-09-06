@@ -118,43 +118,50 @@ export function resolvePendingCredentialBootstraps(
   const root = ownerDir(botmuxHome, ownerId);
   const result: ResolvedCredentialBootstrap[] = [];
   for (const mount of mounts) {
-    const bootstrap = mount.bootstrap;
-    if (!bootstrap) continue;
-    const hostSuccessPaths = bootstrap.successPaths.map(path => join(root, path));
-    const translate = (hostPath: string): string => {
-      const backing = [...mounts]
-        .sort((a, b) => b.source.length - a.source.length)
-        .find(candidate => hostPath === candidate.source || hostPath.startsWith(`${candidate.source}/`));
-      if (!backing) throw new Error(`credential bootstrap success path is outside configured mounts: ${hostPath}`);
-      const suffix = hostPath.slice(backing.source.length).replace(/^\//, '');
-      return suffix ? join(backing.target, suffix) : backing.target;
-    };
-    const canonicalCommand = (name: string): string | undefined => {
-      const command = resolveCommand(name);
-      if (!command) return undefined;
-      try { return realpathSync(command); } catch { return command; }
-    };
-    const command = canonicalCommand(bootstrap.command);
-    const checkCommand = bootstrap.checkCommand
-      ? canonicalCommand(bootstrap.checkCommand.command)
-      : undefined;
-    if (!command || (bootstrap.checkCommand && !checkCommand)) {
-      throw new Error(`credential bootstrap command is not executable: ${bootstrap.command}`);
+    const bootstraps = Array.isArray(mount.bootstrap)
+      ? mount.bootstrap
+      : mount.bootstrap ? [mount.bootstrap] : [];
+    for (const bootstrap of bootstraps) {
+      const bootstrapId = bootstrap.id && bootstrap.id !== mount.id
+        ? `${mount.id}~${bootstrap.id}`
+        : mount.id;
+      const hostSuccessPaths = bootstrap.successPaths.map(path => join(root, path));
+      const translate = (hostPath: string): string => {
+        const backing = [...mounts]
+          .sort((a, b) => b.source.length - a.source.length)
+          .find(candidate => hostPath === candidate.source || hostPath.startsWith(`${candidate.source}/`));
+        if (!backing) throw new Error(`credential bootstrap success path is outside configured mounts: ${hostPath}`);
+        const suffix = hostPath.slice(backing.source.length).replace(/^\//, '');
+        return suffix ? join(backing.target, suffix) : backing.target;
+      };
+      const canonicalCommand = (name: string): string | undefined => {
+        const command = resolveCommand(name);
+        if (!command) return undefined;
+        try { return realpathSync(command); } catch { return command; }
+      };
+      const command = canonicalCommand(bootstrap.command);
+      const checkCommand = bootstrap.checkCommand
+        ? canonicalCommand(bootstrap.checkCommand.command)
+        : undefined;
+      if (!command || (bootstrap.checkCommand && !checkCommand)) {
+        throw new Error(`credential bootstrap command is not executable: ${bootstrap.command}`);
+      }
+      result.push({
+        id: bootstrapId,
+        displayName: bootstrap.id,
+        executableName: bootstrap.command,
+        command,
+        args: [...bootstrap.args],
+        successPaths: hostSuccessPaths.map(translate),
+        checkCommand: bootstrap.checkCommand && checkCommand
+          ? { command: checkCommand, args: [...bootstrap.checkCommand.args] }
+          : undefined,
+        timeoutSeconds: bootstrap.timeoutSeconds,
+        lockPath: mount.kind === 'directory'
+          ? join(mount.target, `.botmux-bootstrap-${bootstrapId}.lock`)
+          : `${mount.target}.botmux-bootstrap-${bootstrapId}.lock`,
+      });
     }
-    result.push({
-      id: mount.id,
-      executableName: bootstrap.command,
-      command,
-      args: [...bootstrap.args],
-      successPaths: hostSuccessPaths.map(translate),
-      checkCommand: bootstrap.checkCommand && checkCommand
-        ? { command: checkCommand, args: [...bootstrap.checkCommand.args] }
-        : undefined,
-      timeoutSeconds: bootstrap.timeoutSeconds,
-      lockPath: mount.kind === 'directory'
-        ? join(mount.target, `.botmux-bootstrap-${mount.id}.lock`)
-        : `${mount.target}.botmux-bootstrap-${mount.id}.lock`,
-    });
   }
   return result;
 }

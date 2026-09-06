@@ -107,12 +107,21 @@ describe('frozen credential isolation session state', () => {
       'alice',
       command => `/usr/bin/${command}`,
     );
-    expect(plans).toHaveLength(1);
+    expect(plans).toHaveLength(2);
     expect(plans[0]).toMatchObject({
       id: 'bytedcli',
       command: '/usr/bin/bytedcli',
       successPaths: ['/home/tester/.local/share/bytedcli/data/userinfo.json'],
       lockPath: '/home/tester/.local/share/bytedcli/.botmux-bootstrap-bytedcli.lock',
+    });
+    expect(plans[1]).toMatchObject({
+      id: 'bytedcli~meego',
+      displayName: 'meego',
+      executableName: 'bytedcli',
+      command: '/usr/bin/bytedcli',
+      args: ['meego', 'login', '--max-wait-ms', '600000', '--no-terminal-qr'],
+      successPaths: ['/home/tester/.local/share/bytedcli/data/meego_auth.json'],
+      lockPath: '/home/tester/.local/share/bytedcli/.botmux-bootstrap-bytedcli~meego.lock',
     });
   });
 

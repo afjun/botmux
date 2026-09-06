@@ -12,8 +12,8 @@ are reused across Bots; Bots without the policy keep using host login state.
 
 Each Session freezes the Bot's credential mount policy at creation. A mount maps
 an owner-private source to one concrete path below `$HOME` inside bwrap and may
-declare a structured, shell-free bootstrap command plus success paths, an
-optional check command. Configuration changes affect only new Sessions. Failure
+declare one structured, shell-free bootstrap command or an ordered list of them,
+each with success paths and an optional check command. Configuration changes affect only new Sessions. Failure
 to resolve an owner, establish bwrap, verify a mount, or complete bootstrap fails
 closed rather than exposing host credentials.
 
@@ -27,7 +27,8 @@ intentionally does not verify that the resulting account is the Session owner.
 The Bot configuration supplies built-in presets for bytedcli, ByteCloud CLI,
 DevFlow, and the Playwright browser profile, plus structured custom mounts.
 For the three ByteCloud-backed tools, bytedcli is the single interactive login
-source. Each ByteCloud CLI or DevFlow invocation obtains a fresh ByteCloud JWT
+source. Meego follows that login as a separate OAuth bootstrap while persisting
+inside the same owner-private bytedcli mount. Each ByteCloud CLI or DevFlow invocation obtains a fresh ByteCloud JWT
 from the owner's isolated bytedcli state and injects it only into that child
 process; their different on-disk credential formats are not copied or shared.
 Playwright remains site-specific and keeps its own browser profile.

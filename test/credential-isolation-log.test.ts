@@ -53,6 +53,9 @@ describe('owner credential trace logging', () => {
     expect(credentialBootstrapToolName(
       '[owner-credential] event=bootstrap.required mount=bytedcli result=login_required',
     )).toBe('bytedcli');
+    expect(credentialBootstrapToolName(
+      '[owner-credential] event=bootstrap.step_completed mount=meego result=ready',
+    )).toBe('meego');
     expect(credentialBootstrapToolName('[botmux] 正在登录 bytedcli')).toBeUndefined();
   });
 });

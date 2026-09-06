@@ -48,8 +48,20 @@ describe('normalizeCredentialIsolationConfig', () => {
       .toBe('~/.devflow-cli/localcache');
     expect(config.mounts.find(mount => mount.id === 'bytecloud')?.bootstrap).toBeUndefined();
     expect(config.mounts.find(mount => mount.id === 'devflow-auth')?.bootstrap).toBeUndefined();
-    expect(config.mounts.find(mount => mount.id === 'bytedcli')?.bootstrap?.successPaths)
-      .toEqual(['bytedcli/data/userinfo.json']);
+    expect(config.mounts.find(mount => mount.id === 'bytedcli')?.bootstrap)
+      .toMatchObject([
+        {
+          id: 'bytedcli',
+          args: ['auth', 'login'],
+          successPaths: ['bytedcli/data/userinfo.json'],
+        },
+        {
+          id: 'meego',
+          args: ['meego', 'login', '--max-wait-ms', '600000', '--no-terminal-qr'],
+          successPaths: ['bytedcli/data/meego_auth.json'],
+          checkCommand: { command: 'bytedcli', args: ['--json', 'meego', 'user', 'me'] },
+        },
+      ]);
     expect(config.mounts.some(mount => mount.target === '~/.devflow-cli')).toBe(false);
   });
 

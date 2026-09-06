@@ -133,5 +133,5 @@ export function credentialBootstrapLifecycle(line: string): CredentialBootstrapL
 
 export function credentialBootstrapToolName(line: string): string | undefined {
   if (!line.startsWith('[owner-credential] event=bootstrap.')) return undefined;
-  return line.match(/event=bootstrap\.(?:required|command_started)\b.*?\bmount=([A-Za-z0-9._~-]+)/)?.[1];
+  return line.match(/event=bootstrap\.(?:required|command_started|step_completed)\b.*?\bmount=([A-Za-z0-9._~-]+)/)?.[1];
 }
