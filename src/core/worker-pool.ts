@@ -5641,10 +5641,6 @@ function setupWorkerHandlers(
                 horizontal_spacing: 'small',
                 columns: [
                   {
-                    tag: 'column', width: 'weighted', weight: 3, vertical_align: 'center',
-                    elements: [{ tag: 'div', text: { tag: 'plain_text', content: ' ' } }],
-                  },
-                  {
                     tag: 'column', width: 'weighted', weight: 2, vertical_align: 'center',
                     elements: [{
                       tag: 'interactive_container',
@@ -5664,7 +5660,7 @@ function setupWorkerHandlers(
                     }],
                   },
                   {
-                    tag: 'column', width: 'weighted', weight: 3, vertical_align: 'center',
+                    tag: 'column', width: 'weighted', weight: 6, vertical_align: 'center',
                     elements: [{ tag: 'div', text: { tag: 'plain_text', content: ' ' } }],
                   },
                 ],

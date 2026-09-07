@@ -329,7 +329,6 @@ describe('worker-pool lifecycle hook integration', () => {
     expect(card.elements[1]).toMatchObject({
       tag: 'column_set',
       columns: [
-        { width: 'weighted', weight: 3 },
         {
           width: 'weighted',
           weight: 2,
@@ -339,7 +338,7 @@ describe('worker-pool lifecycle hook integration', () => {
             elements: [{ tag: 'img', img_key: 'img_owner_login' }],
           }],
         },
-        { width: 'weighted', weight: 3 },
+        { width: 'weighted', weight: 6 },
       ],
     });
     expect(card.elements[2]).toMatchObject({
