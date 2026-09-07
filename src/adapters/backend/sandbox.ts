@@ -571,6 +571,9 @@ export function prepareDirectSandbox(opts: {
   chdir: string;
   /** Canonical $HOME to set for the child. */
   home: string;
+  /** Host passwd-home symlink to reproduce inside the fresh root. OpenSSH uses
+   * passwd home rather than $HOME when expanding ~/.ssh. */
+  homeSymlink?: { path: string; target: string };
   cliBin: string;
   cliArgs: string[];
   /** Missing credential bootstraps to execute inside this exact bwrap namespace
@@ -650,6 +653,7 @@ exec ${shellQuote(bridge.command)} "$@"
       if (lstatSync(p).isSymbolicLink()) symlinks.push({ path: p, target: readlinkSync(p) });
     } catch { /* absent on this distro */ }
   }
+  if (opts.homeSymlink) symlinks.push(opts.homeSymlink);
   const filePaths = new Set<string>();
   for (const r of opts.policy.rules) {
     if (r.access !== 'deny') continue;

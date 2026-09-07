@@ -118,6 +118,26 @@ describe('coreOnlyPidNamespaceDegrade gate (credential-safety)', () => {
 // tmux pipe-pane fails). prepareDirectSandbox must realpath the bin so the exec
 // target lands on a bound path.
 describe('prepareDirectSandbox canonicalizes the exec bin (symlinked-$HOME)', () => {
+  it('reproduces the passwd-home symlink so OpenSSH can resolve ~/.ssh', () => {
+    if (process.platform !== 'linux') return;
+    const dir = mkdtempSync(join(tmpdir(), 'sbx-home-link-'));
+    const home = join(dir, 'canonical-home');
+    const lexicalHome = join(dir, 'lexical-home');
+    mkdirSync(home);
+    symlinkSync(home, lexicalHome);
+    const r = prepareDirectSandbox({
+      sessionId: 'home-link', dataDir: tmp(),
+      policy: { rules: [], net: true, writeRegexes: [] },
+      chdir: home, home, homeSymlink: { path: lexicalHome, target: home },
+      cliBin: '/usr/bin/true', cliArgs: [],
+    });
+    if (!r) return;
+    const symlinkAt = r.args.findIndex((value, index) => value === '--symlink'
+      && r.args[index + 1] === home && r.args[index + 2] === lexicalHome);
+    expect(symlinkAt).toBeGreaterThanOrEqual(0);
+    r.cleanup();
+  });
+
   it('replaces a symlinked cli bin path with its realpath in the bwrap argv', () => {
     if (process.platform !== 'linux') return; // bwrap path only built on linux
     const dir = mkdtempSync(join(tmpdir(), 'sbx-binlink-'));

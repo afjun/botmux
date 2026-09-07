@@ -9267,6 +9267,19 @@ async function spawnCli(
     // them in one namespace; survivors are canonicalized afterwards by keepExisting.
     const lexicalHome = homedir();
     const expandTildeLexical = (raw: string) => raw.replace(/^~(?=\/|$)/, lexicalHome);
+    let ownerSshHomeSymlink: { path: string; target: string } | undefined;
+    if (process.platform === 'linux' && ownerGitIdentityEnabled && lexicalHome !== sandboxHome) {
+      ownerSshHomeSymlink = { path: lexicalHome, target: sandboxHome };
+    }
+    if (ownerGitIdentityEnabled) {
+      log(formatCredentialTrace('git_ssh.configured', {
+        sessionId: cfg.sessionId,
+        botId: cfg.larkAppId,
+        ownerId: cfg.credentialPrincipal!.ownerId,
+        source: 'host_read_only',
+        result: 'ready',
+      }));
+    }
     const keepExisting = (paths: (string | undefined)[]) => {
       const out: string[] = [];
       for (const raw of paths) {
@@ -9845,6 +9858,7 @@ async function spawnCli(
         policy,
         chdir: canonical(cfg.workingDir),
         home: sandboxHome,
+        homeSymlink: ownerSshHomeSymlink,
         cliBin: cliAdapter.resolvedBin,
         cliArgs: args,
         credentialBootstraps,
