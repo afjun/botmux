@@ -83,6 +83,7 @@ import {
   resolveCredentialBindMounts,
   resolvePendingCredentialBootstraps,
 } from './core/owner.js';
+import { prepareOwnerPlaywrightMcp } from './core/owner-playwright-mcp.js';
 import { CREDENTIAL_BOOTSTRAP_LEASE_TARGET } from './core/credential-bootstrap-lease.js';
 import {
   credentialBootstrapLifecycle,
@@ -9228,7 +9229,7 @@ async function spawnCli(
   // 复现形态（是否套 wrapperCli）由 selectReproduceLaunch 在 spawn 时统一决策——见
   // reproduce-command.ts。这里只锁定"包装前的基础"这个事实。
   const reproduceBaseBin = spawnBin;
-  const reproduceBaseArgs = [...spawnArgs];
+  let reproduceBaseArgs = [...spawnArgs];
 
   // ── UNIFIED file sandbox (fs-policy): ONE policy source, BOTH platforms. ──
   // Three-tier deny-by-default whitelist compiled to Seatbelt (darwin) or bwrap
@@ -9479,6 +9480,37 @@ async function spawnCli(
           credentialIsolation: cfg.credentialIsolation,
         }, sandboxHome, canonical(configuredBotmuxHome))
       : [];
+    const ownerPlaywrightMcp = prepareOwnerPlaywrightMcp({
+      sessionId: cfg.sessionId,
+      dataDir,
+      claudeFamily: !!claudeDataDir,
+      freshProcess: !willReattachPersistent,
+      ownerCredentialIsolation,
+      wrapperCli: cfg.wrapperCli,
+      mounts: credentialBindMounts,
+      resolveCommand: locateOnPath,
+    });
+    if (ownerPlaywrightMcp.status === 'configured') {
+      args.push(...ownerPlaywrightMcp.claudeArgs);
+      reproduceBaseArgs = [...args];
+      log(formatCredentialTrace('playwright_mcp.configured', {
+        sessionId: cfg.sessionId,
+        botId: cfg.larkAppId,
+        ownerId: cfg.credentialPrincipal!.ownerId,
+        mountId: 'playwright',
+        result: 'ready',
+        source: 'session_scoped',
+      }));
+    } else if (ownerPlaywrightMcp.status === 'missing') {
+      log(formatCredentialTrace('playwright_mcp.missing', {
+        sessionId: cfg.sessionId,
+        botId: cfg.larkAppId,
+        ownerId: cfg.credentialPrincipal!.ownerId,
+        mountId: 'playwright',
+        result: 'missing',
+        reason: ownerPlaywrightMcp.reason,
+      }));
+    }
     const credentialBootstrapLeaseSource = ownerCredentialIsolation
       ? credentialBootstrapLeaseDirectory(canonical(configuredBotmuxHome), cfg.credentialPrincipal!.ownerId)
       : undefined;
@@ -9720,6 +9752,7 @@ async function spawnCli(
           dirname(bridge.command),
           ...(bridge.command.includes('/node_modules/') ? [dirname(dirname(bridge.command))] : []),
         ]),
+        ...(ownerPlaywrightMcp.status === 'configured' ? ownerPlaywrightMcp.execPaths : []),
       ]),
       readonlyRoots: keepExisting([
         // Temporary shared Git authentication: owner-isolated sessions reuse
@@ -9729,6 +9762,7 @@ async function spawnCli(
         ...(ownerGitIdentityEnabled ? [`${sandboxHome}/.ssh`] : []),
         ...(cfg.skillReadonlyRoots ?? []),
         ...piInitialPromptReadonlyRoots,
+        ...(ownerPlaywrightMcp.status === 'configured' ? ownerPlaywrightMcp.readonlyRoots : []),
         // Adapter-declared read-only host paths (e.g. traex/coco first-run
         // migration done-markers at ~/.trae root). Exposed read-only so the CLI
         // sees them without widening the read-WRITE authPaths surface. `~`-expanded

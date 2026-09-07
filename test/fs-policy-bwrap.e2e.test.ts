@@ -28,6 +28,7 @@ import { mkdtempSync, rmSync, rmdirSync, writeFileSync, readFileSync, mkdirSync,
 import { tmpdir, homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { buildFsPolicy, compileToBwrap } from '../src/adapters/cli/fs-policy.js';
+import { prepareOwnerPlaywrightMcp } from '../src/core/owner-playwright-mcp.js';
 
 const bwrapUsable = process.platform === 'linux'
   && spawnSync('sh', ['-c', 'command -v bwrap'], { stdio: 'ignore' }).status === 0
@@ -53,6 +54,7 @@ d('bwrap three-tier enforcement (real bubblewrap)', () => {
   function build(
     userPaths: { readWrite?: string[]; readOnly?: string[]; deny?: string[] },
     credentialMounts?: Array<{ source: string; target: string; kind: 'directory' | 'file' }>,
+    readonlyRoots?: string[],
   ) {
     const emptiesDir = join(S, 'sbx/empties');
     const emptyDir = join(S, 'sbx/empty');
@@ -66,6 +68,7 @@ d('bwrap three-tier enforcement (real bubblewrap)', () => {
       workingDir: join(S, 'proj'), currentAppId: 'cli_e2e', botHome: join(S, 'botmux-home/bots/cli_e2e'),
       redirectedCliData: true,
       execPaths: [dirname(canonical(process.execPath))],
+      readonlyRoots,
       userPaths: { readOnly: [join(S, 'ref'), ...(userPaths.readOnly ?? [])], readWrite: userPaths.readWrite, deny: userPaths.deny },
       credentialMounts,
       net: true, writeRegexes: [],
@@ -145,6 +148,26 @@ d('bwrap three-tier enforcement (real bubblewrap)', () => {
     expect(run(args, `echo refreshed > ${JSON.stringify(join(target, 'token'))}`).status).toBe(0);
     expect(readFileSync(join(source, 'token'), 'utf8').trim()).toBe('refreshed');
     expect(existsSync(join(target, 'token'))).toBe(false);
+  });
+
+  it('owner Playwright config is read-only while profile writes land in the owner bind', () => {
+    const source = join(S, 'owners/alice/playwright');
+    const target = join(S, 'proj/home/.cache/ms-playwright-mcp');
+    mkdirSync(source, { recursive: true });
+    mkdirSync(target, { recursive: true });
+    const plan = prepareOwnerPlaywrightMcp({
+      sessionId: 'e2e-session', dataDir: join(S, 'botmux-home/data'),
+      claudeFamily: true, freshProcess: true, ownerCredentialIsolation: true,
+      mounts: [{ id: 'playwright', kind: 'directory', ownerSubdir: 'playwright', source, target }],
+      resolveCommand: command => command === 'playwright-mcp' ? '/bin/true' : null,
+    });
+    expect(plan.status).toBe('configured');
+    if (plan.status !== 'configured') return;
+    const { args } = build({}, [{ source, target, kind: 'directory' }], plan.readonlyRoots);
+    expect(run(args, `cat ${JSON.stringify(plan.configPath)}`).out).toContain('LocalNetworkAccessChecks');
+    expect(run(args, `mkdir -p ${JSON.stringify(plan.profileDir)} && echo login > ${JSON.stringify(join(plan.profileDir, 'state'))}`).status).toBe(0);
+    expect(readFileSync(join(source, 'profile/state'), 'utf8').trim()).toBe('login');
+    expect(run(args, `echo tamper >> ${JSON.stringify(plan.configPath)}`).status).not.toBe(0);
   });
 
   it('deny DIR (existing): real content unreadable, and mask empty/unlistable for non-root (root may list but sees nothing real)', () => {

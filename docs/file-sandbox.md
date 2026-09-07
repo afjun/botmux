@@ -34,7 +34,7 @@ Linux 依赖 bubblewrap（bwrap），macOS 用同一份 policy 经 Seatbelt（`s
 
 - 新会话通过发起人的飞书 Open ID 查询邮箱，并以邮箱前缀作为共享 key；凭证落在 `~/.botmux/owners/<邮箱前缀>/`，因此同一 owner 可跨 bot 复用。
 - Git 暂时复用宿主机 `~/.ssh`（沙盒内只读）；提交的 author/committer 使用会话创建时校验并冻结的 owner 姓名和邮箱。代码平台看到的远端 SSH 身份仍是宿主机账号，这只是提交署名隔离，不是 Git 权限隔离。
-- 内置 preset 覆盖 BytedCLI、Meego、ByteCloud CLI、DevFlow 的登录状态和 Playwright MCP 浏览器 profile。缺少登录态时 Botmux 在同一个 bwrap 中依次完成 BytedCLI 和 Meego 登录，首条业务 prompt 在全部登录成功前不会发送；登录 URL 会生成左对齐二维码卡片回传到话题。ByteCloud CLI 和 DevFlow 复用 BytedCLI 身份，Meego 使用自己的 OAuth 状态；Playwright 没有通用登录命令，访问具体站点时产生的 profile 会直接持久化。
+- 内置 preset 覆盖 BytedCLI、Meego、ByteCloud CLI、DevFlow 的登录状态和 Playwright MCP 浏览器 profile。缺少登录态时 Botmux 在同一个 bwrap 中依次完成 BytedCLI 和 Meego 登录，首条业务 prompt 在全部登录成功前不会发送；登录 URL 会生成左对齐二维码卡片回传到话题。ByteCloud CLI 和 DevFlow 复用 BytedCLI 身份，Meego 使用自己的 OAuth 状态；Playwright 没有通用登录命令，开启该 preset 的新 Claude 会话会自动注入同一 bwrap 内的 Playwright MCP，访问站点产生的 profile 与会话输出都写入 owner 挂载目录。同一 owner 跨 bot、跨工作目录复用一个 profile；同一 owner 并发使用浏览器时，后启动者会收到 Playwright 的 profile 正在使用错误，不会共享或损坏浏览器状态。
 - `mounts` 支持按 `id` 覆盖/关闭 preset，或增加 `{id, kind, target, ownerSubdir, bootstrap}` 自定义映射；`bootstrap` 可以是单个步骤，也可以是带唯一 `id` 的有序步骤数组。`target` 必须位于 `$HOME` 下，`ownerSubdir` 必须是 owner 根目录下的相对路径；配置在会话创建时冻结，所以修改后只影响新会话。
 - 开启后会话自动冻结 `sandbox: true`，当前仅支持 Linux bwrap 的 PTY/Tmux 会话。拿不到邮箱、挂载/登录失败、采用其他 backend 或 adopt 已运行进程时都会 fail-closed；未开启的 bot 完全沿用宿主机登录态。
 - 会话绑定唯一 credential principal。普通消息、Webhook 和会驱动 CLI 的卡片操作都要求操作者 Open ID 与 principal 一致；登录链接/二维码按本需求仍允许话题内所有成员看见。
