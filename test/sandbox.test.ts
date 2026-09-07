@@ -11,6 +11,7 @@ import { describe, it, expect } from 'vitest';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mkdtempSync, existsSync, writeFileSync, readFileSync, symlinkSync, realpathSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { buildRelayHostEnv, validateRelayRequest, materializeOutboxFile, prepareDirectSandbox, coreOnlyPidNamespaceDegrade, bwrapCanUnsharePid, pidNsDualProbeCanUnshare, __testOnly_resetPidNamespaceProbe } from '../src/adapters/backend/sandbox.js';
 import { createCodexAppAdapter } from '../src/adapters/cli/codex-app.js';
 
@@ -170,6 +171,67 @@ describe('prepareDirectSandbox credential bootstrap wrapper', () => {
     expect(JSON.parse(readFileSync(specFile, 'utf8'))[0]).toMatchObject({ id: 'demo' });
     expect(r.args[dashDash + 4]).toBe('/usr/bin/true');
     expect(r.args[dashDash + 5]).toBe('--version');
+    r.cleanup();
+  });
+
+  it('injects a fresh bytedcli JWT when ByteCloud tools are invoked', () => {
+    if (process.platform !== 'linux') return;
+    const dataDir = tmp();
+    const dir = tmp();
+    const bytedcli = '/bin/echo';
+    const target = '/bin/sh';
+    const r = prepareDirectSandbox({
+      sessionId: 'shared-bytecloud-login', dataDir,
+      policy: { rules: [], net: true, writeRegexes: [] },
+      chdir: dir, home: dir, cliBin: '/usr/bin/true', cliArgs: [],
+      credentialJwtBridges: [{
+        executableName: 'bytecloud-cli',
+        command: target,
+        bytedcliCommand: bytedcli,
+      }],
+      isolateCredentialEnv: true,
+    });
+    if (!r) return;
+    const shimPath = join(
+      dataDir, 'sandboxes', 'shared-bytecloud-login', 'shimbin', 'bytecloud-cli',
+    );
+    const shim = readFileSync(shimPath, 'utf8');
+    expect(shim).toContain(`jwt=$('${bytedcli}' auth get-bytecloud-jwt-token)`);
+    expect(shim).toContain('unset BYTEDCLI_USER_CLOUD_JWT AIME_USER_CLOUD_JWT');
+    expect(shim).toContain('export BYTECLOUD_CLI_JWT_TOKEN="$jwt"');
+    expect(shim).toContain('export BYTECLOUD_CLI_API_JWT_TOKEN="$jwt"');
+    expect(shim).toContain('export AIME_USER_CLOUD_JWT="$jwt"');
+    expect(shim).toContain(`exec '${target}' "$@"`);
+    expect(shim).not.toContain('auth init');
+    for (const key of [
+      'BYTEDCLI_USER_CLOUD_JWT',
+      'AIME_USER_CLOUD_JWT',
+      'AGENTBUDDY_USER_CLOUD_JWT',
+      'BYTECLOUD_CLI_JWT_TOKEN',
+      'BYTECLOUD_CLI_API_JWT_TOKEN',
+      'SDMA_CLI_OPERATOR_JWT_PATH',
+    ]) {
+      expect(r.args).toContain(key);
+      const index = r.args.indexOf(key);
+      expect(r.args[index - 1]).toBe('--unsetenv');
+    }
+    const invoked = spawnSync('/bin/sh', [
+      shimPath, '-c', 'printf "token_set=%s\\nbytedcli_override=%s\\nagentbuddy_override=%s\\nsdma_path=%s\\n" "${BYTECLOUD_CLI_JWT_TOKEN:+yes}" "${BYTEDCLI_USER_CLOUD_JWT:+set}" "${AGENTBUDDY_USER_CLOUD_JWT:+set}" "${SDMA_CLI_OPERATOR_JWT_PATH:+set}"',
+    ], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        BYTEDCLI_USER_CLOUD_JWT: 'host-jwt',
+        AGENTBUDDY_USER_CLOUD_JWT: 'host-jwt',
+        SDMA_CLI_OPERATOR_JWT_PATH: '/host/token',
+      },
+    });
+    expect(invoked.status, `${invoked.error?.message ?? ''}\n${invoked.stderr}`).toBe(0);
+    expect(invoked.stdout).toBe(
+      'token_set=yes\nbytedcli_override=\nagentbuddy_override=\nsdma_path=\n',
+    );
+    expect(invoked.stderr).not.toContain('auth get-bytecloud-jwt-token');
+    expect(invoked.stderr).toContain('event=jwt_bridge.injected tool=bytecloud-cli result=ready');
     r.cleanup();
   });
 

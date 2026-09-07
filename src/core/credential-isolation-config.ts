@@ -71,13 +71,6 @@ export const BUILTIN_CREDENTIAL_MOUNTS: Readonly<Record<CredentialIsolationPrese
     kind: 'directory',
     target: '~/.config/bytecloud-cli',
     ownerSubdir: 'bytecloud-cli',
-    bootstrap: {
-      command: 'bytecloud-cli',
-      args: ['auth', 'init', '--timeout', '10m'],
-      successPaths: ['bytecloud-cli/auth/cn'],
-      checkCommand: { command: 'bytecloud-cli', args: ['auth', 'status'] },
-      timeoutSeconds: CREDENTIAL_BOOTSTRAP_DEFAULT_TIMEOUT_SECONDS,
-    },
   }],
   devflow: [{
     id: 'devflow-conf',
@@ -89,12 +82,6 @@ export const BUILTIN_CREDENTIAL_MOUNTS: Readonly<Record<CredentialIsolationPrese
     kind: 'directory',
     target: '~/.devflow-cli/localcache',
     ownerSubdir: 'devflow/localcache',
-    bootstrap: {
-      command: 'devflow-cli',
-      args: ['auth', 'update'],
-      successPaths: ['devflow/localcache/cloud_jwt_token.txt'],
-      timeoutSeconds: CREDENTIAL_BOOTSTRAP_DEFAULT_TIMEOUT_SECONDS,
-    },
   }],
   playwright: [{
     id: 'playwright',
@@ -306,6 +293,9 @@ export function normalizeCredentialIsolationConfig(
       presets[key as CredentialIsolationPresetId] = raw.presets[key];
     }
   }
+  // ByteCloud CLI and DevFlow reuse the owner's bytedcli login. Keep the
+  // identity source mounted even when a caller only enables a consumer preset.
+  if (presets.bytecloud || presets.devflow) presets.bytedcli = true;
 
   const mounts = new Map<string, CredentialMountConfig>();
   for (const preset of ALL_PRESETS) {
@@ -337,6 +327,12 @@ export function normalizeCredentialIsolationConfig(
   }
 
   const activeMounts = [...mounts.values()];
+  if (activeMounts.some(mount => mount.id === 'bytecloud' || mount.id === 'devflow-auth')) {
+    const bytedcli = activeMounts.find(mount => mount.id === 'bytedcli');
+    if (!bytedcli?.bootstrap) {
+      invalid(configPath, 'bytedcli bootstrap is required by bytecloud and devflow presets');
+    }
+  }
   const overlaps = (left: string, right: string): boolean => left === right
     || left.startsWith(`${right}/`)
     || right.startsWith(`${left}/`);

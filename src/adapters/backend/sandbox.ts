@@ -31,6 +31,25 @@ import {
 } from '../../core/plugins/mcp/environment.js';
 import type { CredentialBootstrapRunnerSpec } from '../../core/credential-bootstrap-runner.js';
 
+export interface CredentialJwtBridgeSpec {
+  executableName: string;
+  command: string;
+  bytedcliCommand: string;
+}
+
+const OWNER_CREDENTIAL_ENV_KEYS = [
+  'BYTEDCLI_USER_CLOUD_JWT',
+  'AIME_USER_CLOUD_JWT',
+  'AGENTBUDDY_USER_CLOUD_JWT',
+  'BYTECLOUD_CLI_JWT_TOKEN',
+  'BYTECLOUD_CLI_API_JWT_TOKEN',
+  'SDMA_CLI_OPERATOR_JWT_PATH',
+] as const;
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
 /** Verify (and best-effort auto-install) bubblewrap so the user needn't
  *  pre-install. Installs via the system package manager when the daemon can
  *  (root, or passwordless sudo); otherwise logs a one-line manual-install hint
@@ -554,6 +573,12 @@ export function prepareDirectSandbox(opts: {
   /** Missing credential bootstraps to execute inside this exact bwrap namespace
    * before the real CLI is started. */
   credentialBootstraps?: readonly CredentialBootstrapRunnerSpec[];
+  /** Tool shims that obtain a fresh ByteCloud JWT from the isolated bytedcli
+   * identity for every invocation. */
+  credentialJwtBridges?: readonly CredentialJwtBridgeSpec[];
+  /** Remove daemon/host auth overrides at the bwrap boundary. Consumer shims
+   * re-export only the JWT derived from the mounted owner identity. */
+  isolateCredentialEnv?: boolean;
   /** Absolute Botmux command paths already persisted in CLI MCP configs.
    * Bind the worker-generated relay shim at those exact paths so a stale or
    * tampered host wrapper cannot replace the trusted gateway entry. */
@@ -583,6 +608,30 @@ export function prepareDirectSandbox(opts: {
     if (!executableName || executableName === 'botmux') continue;
     const credentialShim = join(shimBin, executableName);
     writeFileSync(credentialShim, `#!/bin/sh\nexec ${JSON.stringify(spec.command)} "$@"\n`);
+    chmodSync(credentialShim, 0o755);
+  }
+  for (const bridge of opts.credentialJwtBridges ?? []) {
+    const executableName = basename(bridge.executableName);
+    if (!executableName || executableName === 'botmux') continue;
+    const credentialShim = join(shimBin, executableName);
+    writeFileSync(credentialShim, `#!/bin/sh
+printf '%s\\n' '[owner-credential] event=jwt_bridge.started tool=${executableName}' >&2
+unset ${OWNER_CREDENTIAL_ENV_KEYS.join(' ')}
+jwt=$(${shellQuote(bridge.bytedcliCommand)} auth get-bytecloud-jwt-token) || {
+  status=$?
+  printf '%s\\n' "[owner-credential] event=jwt_bridge.token_failed tool=${executableName} exit_code=$status" >&2
+  exit "$status"
+}
+if [ -z "$jwt" ]; then
+  printf '%s\\n' '[owner-credential] event=jwt_bridge.token_failed tool=${executableName} reason=empty_token' >&2
+  exit 1
+fi
+export BYTECLOUD_CLI_JWT_TOKEN="$jwt"
+export BYTECLOUD_CLI_API_JWT_TOKEN="$jwt"
+export AIME_USER_CLOUD_JWT="$jwt"
+printf '%s\\n' '[owner-credential] event=jwt_bridge.injected tool=${executableName} result=ready' >&2
+exec ${shellQuote(bridge.command)} "$@"
+`);
     chmodSync(credentialShim, 0o755);
   }
 
@@ -732,6 +781,9 @@ export function prepareDirectSandbox(opts: {
   }
   args.push('--unsetenv', 'BOTS_CONFIG');
   args.push('--unsetenv', 'BOTMUX_HOST_RELAY_AUTHORIZED');
+  if (opts.isolateCredentialEnv) {
+    for (const key of OWNER_CREDENTIAL_ENV_KEYS) args.push('--unsetenv', key);
+  }
   for (const [k, v] of Object.entries(env)) args.push('--setenv', k, v);
   // Canonicalize the CLI binary before execvp: on a symlinked-$HOME host
   // (e.g. /home/u → /data00/home/u shared-drive mount) the worker hands us the

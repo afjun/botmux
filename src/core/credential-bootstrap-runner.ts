@@ -165,6 +165,7 @@ async function bootstrapReady(spec: CredentialBootstrapRunnerSpec): Promise<bool
 
 export async function runCredentialBootstraps(specs: readonly CredentialBootstrapRunnerSpec[]): Promise<boolean> {
   trace('bootstrap.batch_started', { result: 'started', count: specs.length });
+  let fresh = false;
   for (const spec of specs) {
     if (await bootstrapReady(spec)) {
       trace('bootstrap.skipped', {
@@ -234,6 +235,7 @@ export async function runCredentialBootstraps(specs: readonly CredentialBootstra
         process.stdout.write(`\n[botmux] ${spec.id} 登录未完成或校验失败。请使用 /restart 重试。\n`);
         return false;
       }
+      fresh = true;
       process.stdout.write(`\n[botmux] ${spec.id} 登录完成。\n`);
     } finally {
       const heartbeat = lockHeartbeats.get(spec.lockPath);
@@ -244,7 +246,7 @@ export async function runCredentialBootstraps(specs: readonly CredentialBootstra
       trace('bootstrap.lock_released', { mountId: spec.id, result: 'released' });
     }
   }
-  trace('bootstrap.batch_completed', { result: 'ready', count: specs.length });
+  trace('bootstrap.batch_completed', { result: 'ready', count: specs.length, fresh });
   return true;
 }
 

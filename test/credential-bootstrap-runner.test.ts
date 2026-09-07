@@ -57,6 +57,27 @@ describe('credential bootstrap runner', () => {
     writeSpy.mockRestore();
   });
 
+  it('marks a completed batch fresh only after an actual login', async () => {
+    const writeSpy = vi.spyOn(process.stdout, 'write');
+    const dir = tmp();
+    const ready = join(dir, 'ready');
+
+    await expect(runCredentialBootstraps([{
+      id: 'shared-login',
+      executableName: 'bytedcli',
+      command: '/usr/bin/touch',
+      args: [ready],
+      successPaths: [ready],
+      timeoutSeconds: 30,
+      lockPath: join(dir, 'lock'),
+    }])).resolves.toBe(true);
+
+    expect(writeSpy.mock.calls.flat().join('')).toContain(
+      '[owner-credential] event=bootstrap.batch_completed result=ready count=1 fresh=true',
+    );
+    writeSpy.mockRestore();
+  });
+
   it('distinguishes a command spawn failure without logging the command', async () => {
     const writeSpy = vi.spyOn(process.stdout, 'write');
     const dir = tmp();

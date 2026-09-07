@@ -347,6 +347,38 @@ describe('worker-pool lifecycle hook integration', () => {
     });
   });
 
+  it('delivers credential login success without raising requires-attention', async () => {
+    const sessionReply = vi.fn(async () => 'om_reply');
+    initWorkerPool({
+      sessionReply,
+      getSessionWorkingDir: () => '/repo',
+      getActiveCount: () => 1,
+      closeSession: vi.fn(),
+    });
+    const worker = makeFakeWorker();
+    const ds = makeDs({ worker });
+    __testOnly_setupWorkerHandlers(ds, worker);
+
+    worker.emit('message', {
+      type: 'credential_bootstrap_succeeded',
+      message: '研发工具登录成功，bytecloud-cli 和 devflow 将复用 bytedcli 身份。',
+    });
+    await flush();
+
+    expect(sessionReply).toHaveBeenCalledWith(
+      'om_root',
+      '研发工具登录成功，bytecloud-cli 和 devflow 将复用 bytedcli 身份。',
+      'text',
+      'app_test',
+      undefined,
+      undefined,
+    );
+    expect(emitHookEventMock).not.toHaveBeenCalledWith(
+      'session.requires_attention',
+      expect.anything(),
+    );
+  });
+
   it('emits session.requires_attention from tui_prompt and user_notify IPC', async () => {
     const worker = makeFakeWorker();
     const ds = makeDs({ worker });

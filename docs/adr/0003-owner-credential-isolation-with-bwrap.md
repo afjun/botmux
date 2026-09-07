@@ -26,6 +26,11 @@ intentionally does not verify that the resulting account is the Session owner.
 
 The Bot configuration supplies built-in presets for bytedcli, ByteCloud CLI,
 DevFlow, and the Playwright browser profile, plus structured custom mounts.
+For the three ByteCloud-backed tools, bytedcli is the single interactive login
+source. Each ByteCloud CLI or DevFlow invocation obtains a fresh ByteCloud JWT
+from the owner's isolated bytedcli state and injects it only into that child
+process; their different on-disk credential formats are not copied or shared.
+Playwright remains site-specific and keeps its own browser profile.
 Configuration is managed in `bots.json`; Dashboard editing is outside the first
 implementation. Playwright has no generic bootstrap: site-specific login happens
 when a business turn opens that site and the owner profile persists the result.

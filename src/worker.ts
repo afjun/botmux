@@ -256,6 +256,7 @@ import {
   startOutboxWatcher,
   sandboxEnabled,
   localSandboxApplies,
+  type CredentialJwtBridgeSpec,
 } from './adapters/backend/sandbox.js';
 import {
   DEVICE_AUTHORITY_DIRECTORY,
@@ -1851,6 +1852,7 @@ let credentialBootstrapActive = false;
 let credentialBootstrapTail = '';
 let credentialBootstrapLoginUrl = '';
 let credentialBootstrapToolName = '当前工具';
+let credentialBootstrapSuccessMessage = '研发工具登录成功。';
 const credentialBootstrapToolNamesByMount = new Map<string, string>();
 const deliveredCredentialBootstrapLoginUrls = new Set<string>();
 const loggedCredentialBootstrapTraceLines = new Set<string>();
@@ -6124,13 +6126,18 @@ function maybeNotifyCredentialBootstrapOutput(data: string): void {
   const traceLines = credentialBootstrapTail.split(/\r?\n/);
   if (!credentialBootstrapTail.endsWith('\n')) traceLines.pop();
   let lifecycle: ReturnType<typeof credentialBootstrapLifecycle> = undefined;
+  let freshLoginCompleted = false;
   for (const line of traceLines) {
     const trimmed = line.trim();
-    if (!trimmed.startsWith('[owner-credential] event=bootstrap.')) continue;
+    if (!trimmed.startsWith('[owner-credential] event=')) continue;
     if (loggedCredentialBootstrapTraceLines.has(trimmed)) continue;
     loggedCredentialBootstrapTraceLines.add(trimmed);
     log(trimmed);
+    if (!trimmed.startsWith('[owner-credential] event=bootstrap.')) continue;
     lifecycle = credentialBootstrapLifecycle(trimmed) ?? lifecycle;
+    if (trimmed.includes('event=bootstrap.batch_completed') && trimmed.includes('fresh=true')) {
+      freshLoginCompleted = true;
+    }
     const mount = toolNameFromCredentialTrace(trimmed);
     if (mount) credentialBootstrapToolName = credentialBootstrapToolNamesByMount.get(mount) ?? mount;
   }
@@ -6164,6 +6171,17 @@ function maybeNotifyCredentialBootstrapOutput(data: string): void {
     // A failed bootstrap has no CLI behind it. Keep the ready gate closed until
     // the automatic respawn resets state and starts a fresh bootstrap attempt.
     if (completed) credentialBootstrapActive = false;
+    if (completed && freshLoginCompleted) {
+      send({
+        type: 'credential_bootstrap_succeeded',
+        message: credentialBootstrapSuccessMessage,
+        turnId: currentBotmuxTurnId,
+        dispatchAttempt: currentBotmuxDispatchAttempt,
+      });
+      log(formatCredentialTrace('bootstrap.success_sent', {
+        sessionId, botId: larkAppIdForUpload, result: 'sent_to_daemon',
+      }));
+    }
     if (credentialBootstrapQrTimer) {
       clearTimeout(credentialBootstrapQrTimer);
       credentialBootstrapQrTimer = null;
@@ -7829,6 +7847,7 @@ async function spawnCli(
   credentialBootstrapTail = '';
   credentialBootstrapLoginUrl = '';
   credentialBootstrapToolName = '当前工具';
+  credentialBootstrapSuccessMessage = '研发工具登录成功。';
   credentialBootstrapToolNamesByMount.clear();
   deliveredCredentialBootstrapLoginUrls.clear();
   loggedCredentialBootstrapTraceLines.clear();
@@ -9436,24 +9455,45 @@ async function spawnCli(
       }));
     }
     let credentialBootstraps: ReturnType<typeof resolvePendingCredentialBootstraps> = [];
+    let credentialJwtBridges: CredentialJwtBridgeSpec[] = [];
     if (ownerCredentialIsolation) {
       try {
+        const resolveCredentialCommand = (command: string): string | undefined => {
+          // DevFlow's PATH entry is a host shell wrapper; use its real binary in
+          // the fresh bwrap root. Other tools resolve through the daemon PATH.
+          if (command === 'devflow-cli') {
+            const real = join(sandboxHome, '.devflow-cli', 'deps', 'devflow-cli');
+            try { if (existsSync(real)) return canonical(real); } catch { /* fall through */ }
+          }
+          const resolved = locateOnPath(command);
+          if (!resolved) return undefined;
+          try { return canonical(resolved); } catch { return resolved; }
+        };
         credentialBootstraps = resolvePendingCredentialBootstraps(
           credentialBindMounts,
           canonical(configuredBotmuxHome),
           cfg.credentialPrincipal!.ownerId,
-          command => {
-            // DevFlow's PATH entry is a shell wrapper whose second-stage binary
-            // lives outside PATH under ~/.devflow-cli/deps. Resolve that real
-            // executable explicitly; prepareDirectSandbox publishes a same-name
-            // shim so both bootstrap and later agent commands use it in bwrap.
-            if (command === 'devflow-cli') {
-              const real = join(sandboxHome, '.devflow-cli', 'deps', 'devflow-cli');
-              try { if (existsSync(real)) return canonical(real); } catch { /* fall through */ }
-            }
-            return locateOnPath(command) ?? undefined;
-          },
+          resolveCredentialCommand,
         );
+        const mountIds = new Set(credentialBindMounts.map(mount => mount.id));
+        const bridgeTargets = [
+          mountIds.has('bytecloud') ? 'bytecloud-cli' : undefined,
+          mountIds.has('devflow-auth') ? 'devflow-cli' : undefined,
+        ].filter((command): command is string => !!command);
+        if (bridgeTargets.length) {
+          const bytedcliCommand = resolveCredentialCommand('bytedcli');
+          if (!mountIds.has('bytedcli') || !bytedcliCommand) {
+            throw new Error('bytecloud/devflow credential bridge requires an executable bytedcli mount');
+          }
+          credentialJwtBridges = bridgeTargets.map(executableName => {
+            const command = resolveCredentialCommand(executableName);
+            if (!command) throw new Error(`credential bridge command is not executable: ${executableName}`);
+            return { executableName, command, bytedcliCommand };
+          });
+          credentialBootstrapSuccessMessage = `研发工具登录成功：bytedcli 已完成认证，${bridgeTargets.join('、')} 将自动复用同一身份。`;
+        } else {
+          credentialBootstrapSuccessMessage = 'bytedcli 登录成功。';
+        }
         for (const spec of credentialBootstraps) {
           credentialBootstrapToolNamesByMount.set(spec.id, spec.executableName);
         }
@@ -9490,6 +9530,24 @@ async function spawnCli(
         }));
       }
       credentialBootstrapPlanCount = credentialBootstraps.length;
+      log(formatCredentialTrace('jwt_bridge.plan_ready', {
+        sessionId: cfg.sessionId,
+        botId: cfg.larkAppId,
+        ownerId: cfg.credentialPrincipal!.ownerId,
+        result: credentialJwtBridges.length ? 'ready' : 'not_required',
+        count: credentialJwtBridges.length,
+        source: 'bytedcli',
+      }));
+      for (const bridge of credentialJwtBridges) {
+        log(formatCredentialTrace('jwt_bridge.tool_planned', {
+          sessionId: cfg.sessionId,
+          botId: cfg.larkAppId,
+          ownerId: cfg.credentialPrincipal!.ownerId,
+          mountId: bridge.executableName,
+          result: 'ready',
+          source: 'bytedcli',
+        }));
+      }
     }
 
     const fsPolicyCtx = {
@@ -9573,6 +9631,12 @@ async function spawnCli(
           dirname(spec.command),
           ...(spec.command.includes('/node_modules/') ? [dirname(dirname(spec.command))] : []),
           ...(spec.checkCommand ? [dirname(spec.checkCommand.command)] : []),
+        ]),
+        ...credentialJwtBridges.flatMap(bridge => [
+          dirname(bridge.bytedcliCommand),
+          ...(bridge.bytedcliCommand.includes('/node_modules/') ? [dirname(dirname(bridge.bytedcliCommand))] : []),
+          dirname(bridge.command),
+          ...(bridge.command.includes('/node_modules/') ? [dirname(dirname(bridge.command))] : []),
         ]),
       ]),
       readonlyRoots: keepExisting([
@@ -9710,6 +9774,8 @@ async function spawnCli(
         cliBin: cliAdapter.resolvedBin,
         cliArgs: args,
         credentialBootstraps,
+        credentialJwtBridges,
+        isolateCredentialEnv: ownerCredentialIsolation,
         trustedBotmuxCommandPaths: [defaultGatewayEntry().command],
         mcpGatewaySocketPath: sessionMcpGatewayHost?.socketPath,
       });

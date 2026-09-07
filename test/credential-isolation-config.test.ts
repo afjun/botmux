@@ -46,11 +46,28 @@ describe('normalizeCredentialIsolationConfig', () => {
     });
     expect(config.mounts.find(mount => mount.id === 'devflow-auth')?.target)
       .toBe('~/.devflow-cli/localcache');
-    expect(config.mounts.find(mount => mount.id === 'devflow-auth')?.bootstrap?.successPaths)
-      .toEqual(['devflow/localcache/cloud_jwt_token.txt']);
+    expect(config.mounts.find(mount => mount.id === 'bytecloud')?.bootstrap).toBeUndefined();
+    expect(config.mounts.find(mount => mount.id === 'devflow-auth')?.bootstrap).toBeUndefined();
     expect(config.mounts.find(mount => mount.id === 'bytedcli')?.bootstrap?.successPaths)
       .toEqual(['bytedcli/data/userinfo.json']);
     expect(config.mounts.some(mount => mount.target === '~/.devflow-cli')).toBe(false);
+  });
+
+  it('keeps bytedcli enabled as the shared login source for ByteCloud tools', () => {
+    const config = normalize({
+      enabled: true,
+      presets: { bytedcli: false, bytecloud: true, devflow: true, playwright: false },
+    })!;
+
+    expect(config.presets.bytedcli).toBe(true);
+    expect(config.mounts.map(mount => mount.id)).toEqual([
+      'bytedcli',
+      'bytecloud',
+      'devflow-conf',
+      'devflow-auth',
+    ]);
+    expect(config.mounts.filter(mount => mount.bootstrap).map(mount => mount.id))
+      .toEqual(['bytedcli']);
   });
 
   it('supports disabling presets and mounts by id', () => {
@@ -66,6 +83,7 @@ describe('normalizeCredentialIsolationConfig', () => {
   it('overrides a built-in mount by id and canonicalizes $HOME', () => {
     const config = normalize({
       enabled: true,
+      presets: { bytecloud: false, devflow: false },
       mounts: [{
         id: 'bytedcli',
         target: '$HOME/.state/bytedcli',
@@ -81,6 +99,13 @@ describe('normalizeCredentialIsolationConfig', () => {
       ownerSubdir: 'custom/bytedcli',
       bootstrap: undefined,
     });
+  });
+
+  it('rejects removing the shared bytedcli login while ByteCloud consumers are enabled', () => {
+    expect(() => normalize({
+      enabled: true,
+      mounts: [{ id: 'bytedcli', bootstrap: null }],
+    })).toThrow(/bytedcli bootstrap is required/);
   });
 
   it('adds a structured custom directory mount and defaults bootstrap timeout', () => {

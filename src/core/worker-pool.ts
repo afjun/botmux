@@ -5701,6 +5701,28 @@ function setupWorkerHandlers(
         break;
       }
 
+      case 'credential_bootstrap_succeeded': {
+        if (managedAuxUiSuppressed(msg.turnId, msg.dispatchAttempt)) break;
+        try {
+          await scopedReply(msg.message, 'text', msg.turnId);
+          logger.info(formatCredentialTrace('bootstrap.success_delivered', {
+            sessionId: ds.session.sessionId,
+            botId: ds.larkAppId,
+            ownerId: ds.session.credentialPrincipal?.ownerId,
+            result: 'delivered',
+          }));
+        } catch (err: any) {
+          logger.error(formatCredentialTrace('bootstrap.success_delivery_failed', {
+            sessionId: ds.session.sessionId,
+            botId: ds.larkAppId,
+            ownerId: ds.session.credentialPrincipal?.ownerId,
+            result: 'error',
+            reason: err.message,
+          }));
+        }
+        break;
+      }
+
       case 'tui_prompt': {
         // AI detected an interactive TUI prompt — post card to thread
         if (!ownsLifecycleMutation()) {
