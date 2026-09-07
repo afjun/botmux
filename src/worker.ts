@@ -267,6 +267,7 @@ import { processStuckWarningTuiKeys, shouldRearmStuckDetector } from './utils/st
 import { sendTuiKeySequence, submitTuiTextInput } from './utils/tui-input-delivery.js';
 import { captureToPng } from './utils/screenshot-renderer.js';
 import { snapshotToPng, snapshotToText, shouldCaptureScreen, isScreenSelfDriven } from './utils/transient-snapshot.js';
+import { extractLoginUrls, renderQrCodePng } from './utils/qr-code.js';
 import { chooseWebTerminalSeed } from './utils/web-terminal-seed.js';
 import {
   mergeHerdrWebSnapshot,
@@ -1848,7 +1849,6 @@ let credentialBootstrapLoginUrl = '';
 const deliveredCredentialBootstrapLoginUrls = new Set<string>();
 const loggedCredentialBootstrapTraceLines = new Set<string>();
 let credentialBootstrapQrTimer: ReturnType<typeof setTimeout> | null = null;
-let lastCredentialBootstrapQrHash = '';
 function publishSandboxRelayCapability(opts: { failClosed?: boolean } = {}): boolean {
   const capability = {
     token: randomBytes(32).toString('hex'),
@@ -4965,9 +4965,7 @@ async function captureAndUpload(): Promise<void> {
   });
 }
 
-/** Capture an interactive login QR independently of the user's streaming-card
- * display mode. Bootstrap runs before the first business prompt, when the
- * ordinary screenshot loop is intentionally dormant. */
+/** Render the login URL as a clean QR independently of terminal layout. */
 async function captureAndUploadCredentialBootstrapQr(): Promise<void> {
   if (!credentialBootstrapActive || apiOnlyForUpload) {
     log(formatCredentialTrace('bootstrap.qr_capture_skipped', {
@@ -4992,35 +4990,11 @@ async function captureAndUploadCredentialBootstrapQr(): Promise<void> {
   }
 
   let png: Buffer;
-  let hash: string;
   try {
-    const pipeResult = await snapshotToPng(backend, renderCols, renderRows);
-    if (pipeResult) {
-      hash = createHash('md5').update(pipeResult.ansi).digest('hex');
-      png = pipeResult.png;
-    } else {
-      if (!renderer) {
-        log(formatCredentialTrace('bootstrap.qr_capture_skipped', {
-          sessionId, botId: larkAppIdForUpload, result: 'skipped', reason: 'terminal_renderer_missing',
-        }));
-        return;
-      }
-      const term = renderer.xterm;
-      const snap = renderer.rawSnapshot();
-      hash = createHash('md5').update(snap).digest('hex');
-      png = captureToPng(term, {
-        cols: clamp(term.cols, MIN_RENDER_COLS, MAX_RENDER_COLS),
-        rows: clamp(term.rows, MIN_RENDER_ROWS, MAX_RENDER_ROWS),
-        startY: term.buffer.active.baseY,
-      });
-    }
-    if (hash === lastCredentialBootstrapQrHash) {
-      log(formatCredentialTrace('bootstrap.qr_capture_skipped', {
-        sessionId, botId: larkAppIdForUpload, result: 'skipped', reason: 'duplicate_frame',
-      }));
-      return;
-    }
-    lastCredentialBootstrapQrHash = hash;
+    png = renderQrCodePng(loginUrl);
+    log(formatCredentialTrace('bootstrap.qr_rendered', {
+      sessionId, botId: larkAppIdForUpload, result: 'ready', source: 'login_url',
+    }));
   } catch (err: any) {
     log(formatCredentialTrace('bootstrap.qr_capture_failed', {
       sessionId, botId: larkAppIdForUpload, result: 'error', reason: err?.message ?? String(err),
@@ -6161,18 +6135,14 @@ function maybeNotifyCredentialBootstrapOutput(data: string): void {
   }
   if (!credentialBootstrapActive) return;
 
-  for (const match of credentialBootstrapTail.matchAll(/https?:\/\/[^\s<>"']+/g)) {
-    const loginUrl = match[0].replace(/[),.;]+$/, '');
+  for (const loginUrl of extractLoginUrls(credentialBootstrapTail)) {
     if (loginUrl !== credentialBootstrapLoginUrl) {
       credentialBootstrapLoginUrl = loginUrl;
       log(formatCredentialTrace('bootstrap.affordance_detected', {
         sessionId, botId: larkAppIdForUpload, result: 'login_url',
       }));
+      scheduleCredentialBootstrapQrCapture();
     }
-  }
-  if (/(?:二维码|scan\s+(?:the\s+)?qr|qr\s*code)/i.test(credentialBootstrapTail)
-    || /[█▀▄]{4,}/.test(credentialBootstrapTail)) {
-    scheduleCredentialBootstrapQrCapture();
   }
   if (lifecycle === 'failed' || lifecycle === 'completed') {
     const completed = lifecycle === 'completed';
@@ -7851,7 +7821,6 @@ async function spawnCli(
   credentialBootstrapLoginUrl = '';
   deliveredCredentialBootstrapLoginUrls.clear();
   loggedCredentialBootstrapTraceLines.clear();
-  lastCredentialBootstrapQrHash = '';
   if (credentialBootstrapQrTimer) {
     clearTimeout(credentialBootstrapQrTimer);
     credentialBootstrapQrTimer = null;
