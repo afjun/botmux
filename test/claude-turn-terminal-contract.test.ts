@@ -83,9 +83,44 @@ describe('Claude durable turn terminal contract', () => {
     expect(isClaudeTurnTerminalEvent(assistant('tool', undefined, 'tool_use'))).toBe(false);
     expect(isClaudeTurnTerminalEvent(assistant('pause', undefined, 'pause_turn'))).toBe(false);
     expect(isClaudeTurnTerminalEvent({
+      type: 'assistant',
+      uuid: 'tool-with-end-turn',
+      message: {
+        role: 'assistant',
+        content: [{ type: 'tool_use', name: 'Bash', input: {} }],
+        stop_reason: 'end_turn',
+      },
+    })).toBe(false);
+    expect(isClaudeTurnTerminalEvent({
       ...assistant('side', 'subagent done', 'end_turn'),
       isSidechain: true,
     } as TranscriptEvent)).toBe(false);
+  });
+
+  it('keeps an end_turn tool call open until the real final assistant message', () => {
+    const h = new ContractHarness();
+    h.mark('delivery-tool-retry', 'deploy with devflow', 1);
+    h.ingest([
+      user('u-tool-retry', 'deploy with devflow'),
+      {
+        type: 'assistant',
+        uuid: 'tool-send',
+        message: {
+          role: 'assistant',
+          content: [
+            { type: 'text', text: 'sending progress' },
+            { type: 'tool_use', name: 'Bash', input: {} },
+          ],
+          stop_reason: 'end_turn',
+        },
+      },
+    ]);
+    expect(h.emitted).toEqual([]);
+
+    h.ingest([assistant('a-tool-retry', 'deployment checked', 'end_turn')]);
+    expect(h.emitted).toEqual([
+      { turnId: 'delivery-tool-retry', dispatchAttempt: 1, status: 'completed' },
+    ]);
   });
 
   it('maps two consecutive/type-ahead transcript turns to one terminal each', () => {

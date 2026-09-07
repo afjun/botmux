@@ -3181,6 +3181,8 @@ interface SessionData {
   webPort?: number;
   larkAppId?: string;
   ownerOpenId?: string;
+  credentialPrincipal?: { openId: string; ownerId: string };
+  credentialIsolation?: { version: 1; mounts: unknown[] };
   creatorOpenId?: string;
   lastCallerOpenId?: string;
   /** Chat-scope quote chain — see Session.quoteTargetId in types.ts. */
@@ -6375,6 +6377,7 @@ import { config } from './config.js';
 import { getSessionUsageSnapshot } from './core/cost-calculator.js';
 import {
   resolveQuoteTarget,
+  resolveMentionBackRecipient,
   validateMentionDecision,
   shouldBlockMentionBackByParticipants,
   parseAttentionFlag,
@@ -7410,6 +7413,14 @@ async function cmdSend(rest: string[]): Promise<void> {
   }
   const replyTargetSenderOpenId = explicitVcMeetingImOrigin?.replyTargetSenderOpenId
     ?? s.quoteTargetSenderOpenId;
+  const credentialOwnerOpenId = s.credentialIsolation
+    ? s.credentialPrincipal?.openId
+    : undefined;
+  const mentionBackOpenId = resolveMentionBackRecipient(
+    !!s.credentialIsolation,
+    credentialOwnerOpenId,
+    replyTargetSenderOpenId,
+  );
 
   // @ hard-gate (config.send.requireMentionDecision, default on): force the
   // model to make an explicit @ decision before sending. --top-level publish
@@ -7420,7 +7431,7 @@ async function cmdSend(rest: string[]): Promise<void> {
     hasMentionArgs: mentionArgs.length > 0,
     mentionBack,
     noMention,
-    hasQuoteTargetSender: !!replyTargetSenderOpenId,
+    hasQuoteTargetSender: !!mentionBackOpenId,
   });
   if (!mentionGate.ok) { console.error(mentionGate.error); process.exit(2); }
 
@@ -7437,14 +7448,15 @@ async function cmdSend(rest: string[]): Promise<void> {
   try { for (const cfg of loadBotConfigs()) registerBot(cfg); } catch { /* */ }
   if (envPinnedRiffBot) { try { registerBot(envPinnedRiffBot); } catch { /* */ } }
 
-  // Participant gate for --mention-back: in a true 1v1 the triggerer is the
-  // only counterpart so auto-@-ing them back is unambiguous, but once a third
-  // party joins (humans + bots > 2) "who triggered this turn" is no longer
-  // reliably "who should be addressed". Force an explicit --mention there.
+  // Owner-isolated sessions have a frozen credential owner, so mention-back is
+  // deterministic regardless of group size. Ordinary sessions retain the
+  // participant gate: once a third party joins, the last triggerer is no longer
+  // reliably who should be addressed and the model must choose explicitly.
   // Symmetric with the inbound un-@ gate (event-dispatcher getGroupStats).
   // Only fetch when mention-back is actually requested AND the chat isn't a p2p
   // DM (inherently 1v1) — keeps the common send path free of an API round-trip.
-  if (mentionBack && s.chatType !== 'p2p' && s.larkAppId && s.chatId && !sendTopLevel) {
+  if (mentionBack && !credentialOwnerOpenId
+      && s.chatType !== 'p2p' && s.larkAppId && s.chatId && !sendTopLevel) {
     try {
       const { getGroupStats } = await import('./im/lark/event-dispatcher.js');
       const { userCount, botCount } = await getGroupStats(s.larkAppId, s.chatId);
@@ -7465,12 +7477,12 @@ async function cmdSend(rest: string[]): Promise<void> {
     }
   }
 
-  // --mention-back: @ the sender of the message this turn is replying to
-  // (open_id from the session — model needn't know it). Bare-name form so it
-  // renders as a trailing <at>.
-  if (mentionBack && replyTargetSenderOpenId
-      && !mentions.some(m => m.open_id === replyTargetSenderOpenId)) {
-    mentions.push({ open_id: replyTargetSenderOpenId, name: '' });
+  // --mention-back: owner-isolated sessions always @ their frozen owner;
+  // ordinary sessions @ the sender of the message this turn is replying to.
+  // Bare-name form renders as a trailing <at>.
+  if (mentionBack && mentionBackOpenId
+      && !mentions.some(m => m.open_id === mentionBackOpenId)) {
+    mentions.push({ open_id: mentionBackOpenId, name: '' });
   }
 
   // Validate file paths

@@ -177,6 +177,18 @@ export function validateMentionDecision(args: MentionDecisionArgs): MentionDecis
   };
 }
 
+/** Owner-isolated sessions keep one frozen human recipient across the whole
+ * session. Ordinary sessions retain the per-turn triggering-sender behavior. */
+export function resolveMentionBackRecipient(
+  ownerIsolationEnabled: boolean,
+  credentialOwnerOpenId: string | undefined,
+  replyTargetSenderOpenId: string | undefined,
+): string | undefined {
+  return ownerIsolationEnabled && credentialOwnerOpenId
+    ? credentialOwnerOpenId
+    : replyTargetSenderOpenId;
+}
+
 export interface MentionBackParticipantArgs {
   /** Session chat type — 'p2p' is inherently 1v1 (no fetch needed). */
   chatType?: 'group' | 'p2p';
