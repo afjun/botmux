@@ -1,11 +1,12 @@
 #!/usr/bin/env node
-import { closeSync, existsSync, openSync, unlinkSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync, statSync, unlinkSync, utimesSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { formatCredentialTrace, type CredentialTraceFields } from './credential-isolation-log.js';
 
 export interface CredentialBootstrapRunnerSpec {
   id: string;
+  executableName: string;
   command: string;
   args: string[];
   successPaths: string[];
@@ -16,7 +17,12 @@ export interface CredentialBootstrapRunnerSpec {
 
 let activeChildPid: number | undefined;
 const ownedLockPaths = new Set<string>();
+const lockHeartbeats = new Map<string, ReturnType<typeof setInterval>>();
 let shuttingDown = false;
+// ponytail: mtime lease favors crash recovery over strict mutual exclusion;
+// use an OS advisory lock if runners may be paused for more than 30 seconds.
+const LOCK_HEARTBEAT_MS = 5_000;
+const LOCK_STALE_MS = 30_000;
 
 function trace(event: string, fields: CredentialTraceFields = {}): void {
   process.stdout.write(`\n${formatCredentialTrace(event, {
@@ -34,6 +40,9 @@ function terminateProcessGroup(pid: number | undefined, signal: NodeJS.Signals):
 function cleanupOwnedLocks(): void {
   const count = ownedLockPaths.size;
   for (const lockPath of ownedLockPaths) {
+    const heartbeat = lockHeartbeats.get(lockPath);
+    if (heartbeat) clearInterval(heartbeat);
+    lockHeartbeats.delete(lockPath);
     try { unlinkSync(lockPath); } catch { /* already gone */ }
   }
   ownedLockPaths.clear();
@@ -67,6 +76,7 @@ interface CredentialCommandResult {
   durationMs: number;
   exitCode?: number;
   signal?: NodeJS.Signals;
+  errorCode?: string;
 }
 
 async function runCommand(command: string, args: string[], timeoutMs: number): Promise<CredentialCommandResult> {
@@ -89,7 +99,11 @@ async function runCommand(command: string, args: string[], timeoutMs: number): P
       }, 2_000).unref();
       finish({ ok: false, outcome: 'timeout' });
     }, timeoutMs);
-    child.once('error', () => finish({ ok: false, outcome: 'spawn_error' }));
+    child.once('error', error => finish({
+      ok: false,
+      outcome: 'spawn_error',
+      errorCode: (error as NodeJS.ErrnoException).code ?? 'unknown',
+    }));
     child.once('exit', (code, signal) => finish(signal
       ? { ok: false, outcome: 'signal', signal }
       : code === 0
@@ -105,10 +119,22 @@ async function acquireOrWait(spec: CredentialBootstrapRunnerSpec): Promise<'acqu
     try {
       closeSync(openSync(spec.lockPath, 'wx', 0o600));
       ownedLockPaths.add(spec.lockPath);
+      const heartbeat = setInterval(() => {
+        try { utimesSync(spec.lockPath, new Date(), new Date()); } catch { /* released */ }
+      }, LOCK_HEARTBEAT_MS);
+      heartbeat.unref();
+      lockHeartbeats.set(spec.lockPath, heartbeat);
       trace('bootstrap.lock_acquired', { mountId: spec.id, result: 'acquired' });
       return 'acquired';
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      try {
+        if (Date.now() - statSync(spec.lockPath).mtimeMs > LOCK_STALE_MS) {
+          unlinkSync(spec.lockPath);
+          trace('bootstrap.lock_reclaimed', { mountId: spec.id, result: 'stale_removed' });
+          continue;
+        }
+      } catch { /* lock changed between stat and unlink; retry normally */ }
       if (!waitingLogged) {
         waitingLogged = true;
         trace('bootstrap.lock_waiting', {
@@ -201,6 +227,7 @@ export async function runCredentialBootstraps(specs: readonly CredentialBootstra
         fresh: true,
         durationMs: commandResult.durationMs + (checkResult?.durationMs ?? 0),
         exitCode: failedCommand?.exitCode,
+        errorCode: failedCommand?.errorCode,
         signal: failedCommand?.signal,
       });
       if (!checkOk) {
@@ -209,6 +236,9 @@ export async function runCredentialBootstraps(specs: readonly CredentialBootstra
       }
       process.stdout.write(`\n[botmux] ${spec.id} 登录完成。\n`);
     } finally {
+      const heartbeat = lockHeartbeats.get(spec.lockPath);
+      if (heartbeat) clearInterval(heartbeat);
+      lockHeartbeats.delete(spec.lockPath);
       try { unlinkSync(spec.lockPath); } catch { /* another cleanup won */ }
       ownedLockPaths.delete(spec.lockPath);
       trace('bootstrap.lock_released', { mountId: spec.id, result: 'released' });
@@ -219,10 +249,13 @@ export async function runCredentialBootstraps(specs: readonly CredentialBootstra
 }
 
 async function main(): Promise<void> {
-  const encoded = process.argv[2];
+  const specArg = process.argv[2];
   const cliBin = process.argv[3];
-  if (!encoded || !cliBin) throw new Error('credential bootstrap runner requires spec and CLI binary');
-  const specs = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')) as CredentialBootstrapRunnerSpec[];
+  if (!specArg || !cliBin) throw new Error('credential bootstrap runner requires spec and CLI binary');
+  const specJson = specArg.startsWith('@')
+    ? readFileSync(specArg.slice(1), 'utf8')
+    : Buffer.from(specArg, 'base64url').toString('utf8');
+  const specs = JSON.parse(specJson) as CredentialBootstrapRunnerSpec[];
   installSignalCleanup();
   // The worker registers PTY listeners immediately after spawn. Leave a small
   // handshake window so a fast login command cannot print its URL before the

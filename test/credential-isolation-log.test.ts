@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  credentialBootstrapLifecycle,
   formatCredentialTrace,
   maskCredentialIdentity,
 } from '../src/core/credential-isolation-log.js';
@@ -38,5 +39,12 @@ describe('owner credential trace logging', () => {
     expect(maskCredentialIdentity('ou_1234567890abcdef')).toBe('ou_1…cdef');
     expect(maskCredentialIdentity('short')).toBe('short');
     expect(maskCredentialIdentity(undefined)).toBeUndefined();
+  });
+
+  it('drives bootstrap lifecycle only from structured runner records', () => {
+    expect(credentialBootstrapLifecycle('[owner-credential] event=bootstrap.batch_started result=started')).toBe('started');
+    expect(credentialBootstrapLifecycle('[owner-credential] event=bootstrap.validation_finished result=failed')).toBe('failed');
+    expect(credentialBootstrapLifecycle('[owner-credential] event=bootstrap.batch_completed result=ready')).toBe('completed');
+    expect(credentialBootstrapLifecycle('[botmux] bytedcli 登录未完成或校验失败')).toBeUndefined();
   });
 });

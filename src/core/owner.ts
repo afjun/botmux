@@ -1,5 +1,5 @@
 import { dirname, join, resolve } from 'node:path';
-import { existsSync, lstatSync, mkdirSync, openSync, closeSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, openSync, closeSync, realpathSync } from 'node:fs';
 import { cloneCredentialMount, type CredentialIsolationConfig, type CredentialMountConfig } from './credential-isolation-config.js';
 import type { CredentialBootstrapRunnerSpec } from './credential-bootstrap-runner.js';
 import type { Session } from '../types.js';
@@ -129,15 +129,21 @@ export function resolvePendingCredentialBootstraps(
       const suffix = hostPath.slice(backing.source.length).replace(/^\//, '');
       return suffix ? join(backing.target, suffix) : backing.target;
     };
-    const command = resolveCommand(bootstrap.command);
+    const canonicalCommand = (name: string): string | undefined => {
+      const command = resolveCommand(name);
+      if (!command) return undefined;
+      try { return realpathSync(command); } catch { return command; }
+    };
+    const command = canonicalCommand(bootstrap.command);
     const checkCommand = bootstrap.checkCommand
-      ? resolveCommand(bootstrap.checkCommand.command)
+      ? canonicalCommand(bootstrap.checkCommand.command)
       : undefined;
     if (!command || (bootstrap.checkCommand && !checkCommand)) {
       throw new Error(`credential bootstrap command is not executable: ${bootstrap.command}`);
     }
     result.push({
       id: mount.id,
+      executableName: bootstrap.command,
       command,
       args: [...bootstrap.args],
       successPaths: hostSuccessPaths.map(translate),

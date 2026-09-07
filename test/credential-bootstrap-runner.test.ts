@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runCredentialBootstraps } from '../src/core/credential-bootstrap-runner.js';
@@ -16,6 +16,7 @@ describe('credential bootstrap runner', () => {
 
     await expect(runCredentialBootstraps([{
       id: 'valid',
+      executableName: 'valid',
       command: '/bin/false',
       args: [],
       successPaths: [ready],
@@ -39,6 +40,7 @@ describe('credential bootstrap runner', () => {
 
     await expect(runCredentialBootstraps([{
       id: 'stale',
+      executableName: 'stale',
       command: '/bin/true',
       args: [],
       successPaths: [ready],
@@ -62,6 +64,7 @@ describe('credential bootstrap runner', () => {
 
     await expect(runCredentialBootstraps([{
       id: 'missing-tool',
+      executableName: 'missing-tool',
       command: '/definitely-missing-credential-login-tool',
       args: ['--secret', 'must-not-appear'],
       successPaths: [join(dir, 'ready')],
@@ -74,5 +77,24 @@ describe('credential bootstrap runner', () => {
     expect(trace).not.toContain('definitely-missing-credential-login-tool');
     expect(trace).not.toContain('must-not-appear');
     writeSpy.mockRestore();
+  });
+
+  it('reclaims a stale lock left by an interrupted sandbox', async () => {
+    const dir = tmp();
+    const lock = join(dir, 'lock');
+    writeFileSync(lock, '');
+    const stale = new Date(Date.now() - 60_000);
+    utimesSync(lock, stale, stale);
+
+    await expect(runCredentialBootstraps([{
+      id: 'stale-lock',
+      executableName: 'true',
+      command: '/bin/true',
+      args: [],
+      successPaths: [join(dir, 'missing')],
+      timeoutSeconds: 1,
+      lockPath: lock,
+    }])).resolves.toBe(false);
+    expect(existsSync(lock)).toBe(false);
   });
 });

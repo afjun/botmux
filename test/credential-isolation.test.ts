@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { mkdtempSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   CredentialOwnerRequiredError,
   credentialPrincipalCanDrive,
@@ -111,5 +114,31 @@ describe('frozen credential isolation session state', () => {
       successPaths: ['/home/tester/.local/share/bytedcli/data/userinfo.json'],
       lockPath: '/home/tester/.local/share/bytedcli/.botmux-bootstrap-bytedcli.lock',
     });
+  });
+
+  it('canonicalizes symlinked bootstrap commands for a fresh bwrap root', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'credential-bootstrap-bin-'));
+    const realCommand = join(dir, 'real-bytedcli');
+    const linkedCommand = join(dir, 'bytedcli');
+    writeFileSync(realCommand, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    symlinkSync(realCommand, linkedCommand);
+
+    const isolated = normalizeCredentialIsolationConfig({
+      enabled: true,
+      presets: { bytedcli: true, bytecloud: false, devflow: false, playwright: false },
+    }, { homeDir: dir, checkFilesystem: false })!;
+    const frozen = freezeCredentialIsolation(isolated, {
+      openId: 'ou_alice', email: 'alice@example.com',
+    });
+    const mounts = resolveCredentialBindMounts(frozen, dir, join(dir, '.botmux'));
+    const [plan] = resolvePendingCredentialBootstraps(
+      mounts,
+      join(dir, '.botmux'),
+      'alice',
+      () => linkedCommand,
+    );
+
+    expect(plan?.command).toBe(realpathSync(linkedCommand));
+    expect(plan?.checkCommand?.command).toBe(realpathSync(linkedCommand));
   });
 });

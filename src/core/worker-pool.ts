@@ -5628,7 +5628,33 @@ function setupWorkerHandlers(
           break;
         }
         try {
-          await scopedReply(JSON.stringify({ image_key: msg.imageKey }), 'image', msg.turnId);
+          const cardJson = JSON.stringify({
+            config: { wide_screen_mode: true },
+            elements: [
+              {
+                tag: 'img',
+                img_key: msg.imageKey,
+                alt: { tag: 'plain_text', content: '登录二维码' },
+                mode: 'fit_horizontal',
+                preview: true,
+              },
+              {
+                tag: 'action',
+                actions: [{
+                  tag: 'button',
+                  text: { tag: 'plain_text', content: '打开登录链接' },
+                  type: 'primary',
+                  multi_url: {
+                    url: msg.loginUrl,
+                    pc_url: msg.loginUrl,
+                    android_url: msg.loginUrl,
+                    ios_url: msg.loginUrl,
+                  },
+                }],
+              },
+            ],
+          });
+          await scopedReply(cardJson, 'interactive', msg.turnId);
           logger.info(formatCredentialTrace('bootstrap.qr_delivered', {
             sessionId: ds.session.sessionId,
             botId: ds.larkAppId,

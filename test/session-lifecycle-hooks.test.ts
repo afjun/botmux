@@ -298,6 +298,36 @@ describe('worker-pool lifecycle hook integration', () => {
     }));
   });
 
+  it('delivers credential bootstrap QR and login URL in one interactive card', async () => {
+    const sessionReply = vi.fn(async () => 'om_reply');
+    initWorkerPool({
+      sessionReply,
+      getSessionWorkingDir: () => '/repo',
+      getActiveCount: () => 1,
+      closeSession: vi.fn(),
+    });
+    const worker = makeFakeWorker();
+    const ds = makeDs({ worker });
+    __testOnly_setupWorkerHandlers(ds, worker);
+
+    worker.emit('message', {
+      type: 'credential_bootstrap_qr',
+      imageKey: 'img_owner_login',
+      loginUrl: 'https://login.example.com/device',
+    });
+    await flush();
+
+    expect(sessionReply).toHaveBeenCalledTimes(1);
+    const [, content, msgType] = sessionReply.mock.calls[0];
+    expect(msgType).toBe('interactive');
+    expect(JSON.parse(content)).toMatchObject({
+      elements: [
+        { tag: 'img', img_key: 'img_owner_login' },
+        { tag: 'action', actions: [{ multi_url: { url: 'https://login.example.com/device' } }] },
+      ],
+    });
+  });
+
   it('emits session.requires_attention from tui_prompt and user_notify IPC', async () => {
     const worker = makeFakeWorker();
     const ds = makeDs({ worker });

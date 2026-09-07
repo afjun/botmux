@@ -81,7 +81,7 @@ import {
   resolveCredentialBindMounts,
   resolvePendingCredentialBootstraps,
 } from './core/owner.js';
-import { formatCredentialTrace } from './core/credential-isolation-log.js';
+import { credentialBootstrapLifecycle, formatCredentialTrace } from './core/credential-isolation-log.js';
 import {
   evaluateVcMeetingManagedSend,
 } from './services/vc-meeting-send-policy.js';
@@ -1844,7 +1844,8 @@ let currentVcMeetingImTurnOrigin: VcMeetingImTurnOrigin | undefined;
 let durableTurnInFlight = false;
 let credentialBootstrapActive = false;
 let credentialBootstrapTail = '';
-const notifiedCredentialBootstrapValues = new Set<string>();
+let credentialBootstrapLoginUrl = '';
+const deliveredCredentialBootstrapLoginUrls = new Set<string>();
 const loggedCredentialBootstrapTraceLines = new Set<string>();
 let credentialBootstrapQrTimer: ReturnType<typeof setTimeout> | null = null;
 let lastCredentialBootstrapQrHash = '';
@@ -4981,6 +4982,14 @@ async function captureAndUploadCredentialBootstrapQr(): Promise<void> {
     }));
     return;
   }
+  const loginUrl = credentialBootstrapLoginUrl;
+  if (!loginUrl || deliveredCredentialBootstrapLoginUrls.has(loginUrl)) {
+    log(formatCredentialTrace('bootstrap.qr_capture_skipped', {
+      sessionId, botId: larkAppIdForUpload, result: 'skipped',
+      reason: loginUrl ? 'login_card_already_delivered' : 'login_url_missing',
+    }));
+    return;
+  }
 
   let png: Buffer;
   let hash: string;
@@ -5030,9 +5039,11 @@ async function captureAndUploadCredentialBootstrapQr(): Promise<void> {
     send({
       type: 'credential_bootstrap_qr',
       imageKey,
+      loginUrl,
       turnId: currentBotmuxTurnId,
       dispatchAttempt: currentBotmuxDispatchAttempt,
     });
+    deliveredCredentialBootstrapLoginUrls.add(loginUrl);
     log(formatCredentialTrace('bootstrap.qr_uploaded', {
       sessionId, botId: larkAppIdForUpload, result: 'sent_to_daemon',
     }));
@@ -5045,7 +5056,7 @@ async function captureAndUploadCredentialBootstrapQr(): Promise<void> {
 }
 
 function scheduleCredentialBootstrapQrCapture(): void {
-  if (credentialBootstrapQrTimer) clearTimeout(credentialBootstrapQrTimer);
+  if (credentialBootstrapQrTimer) return;
   credentialBootstrapQrTimer = setTimeout(() => {
     credentialBootstrapQrTimer = null;
     void captureAndUploadCredentialBootstrapQr();
@@ -6124,72 +6135,56 @@ function cancelAmbiguousSubmissionAfterFailure(
   }
 }
 
-/** Relay interactive login affordances from the sandbox PTY back to the Lark
- * topic. The full terminal remains available for QR rendering; URLs and short
- * device-code lines are additionally posted as text so login does not require
- * the user to manually run an initialization command. */
+/** Relay interactive login affordances from the sandbox PTY back to Lark as
+ * one QR + URL card, without leaking the surrounding terminal as plain text. */
 function maybeNotifyCredentialBootstrapOutput(data: string): void {
   const plain = stripAnsiForLog(data);
   credentialBootstrapTail = tailChars(credentialBootstrapTail + plain, 4_096);
   const traceLines = credentialBootstrapTail.split(/\r?\n/);
   if (!credentialBootstrapTail.endsWith('\n')) traceLines.pop();
+  let lifecycle: ReturnType<typeof credentialBootstrapLifecycle> = undefined;
   for (const line of traceLines) {
     const trimmed = line.trim();
     if (!trimmed.startsWith('[owner-credential] event=bootstrap.')) continue;
     if (loggedCredentialBootstrapTraceLines.has(trimmed)) continue;
     loggedCredentialBootstrapTraceLines.add(trimmed);
     log(trimmed);
+    lifecycle = credentialBootstrapLifecycle(trimmed) ?? lifecycle;
   }
-  if (credentialBootstrapTail.includes('[botmux] 正在初始化')) {
+  if (lifecycle === 'started') {
     if (!credentialBootstrapActive) {
       credentialBootstrapActive = true;
       log(formatCredentialTrace('bootstrap.interactive_started', {
         sessionId, botId: larkAppIdForUpload, result: 'waiting_for_login',
       }));
-      send({
-        type: 'user_notify',
-        message: '🔐 正在自动初始化 owner 专属凭证。登录链接或设备码会直接发到本话题；如工具仅显示二维码，请打开当前会话的网页终端扫码。',
-        turnId: currentBotmuxTurnId,
-      });
     }
   }
   if (!credentialBootstrapActive) return;
 
-  const values = new Set<string>();
   for (const match of credentialBootstrapTail.matchAll(/https?:\/\/[^\s<>"']+/g)) {
-    values.add(match[0].replace(/[),.;]+$/, ''));
-  }
-  for (const line of credentialBootstrapTail.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (trimmed.length <= 512 && /(?:设备码|验证码|device\s*(?:code)?|verification\s*code)/i.test(trimmed)) {
-      values.add(trimmed);
+    const loginUrl = match[0].replace(/[),.;]+$/, '');
+    if (loginUrl !== credentialBootstrapLoginUrl) {
+      credentialBootstrapLoginUrl = loginUrl;
+      log(formatCredentialTrace('bootstrap.affordance_detected', {
+        sessionId, botId: larkAppIdForUpload, result: 'login_url',
+      }));
     }
-  }
-  for (const value of values) {
-    if (notifiedCredentialBootstrapValues.has(value)) continue;
-    notifiedCredentialBootstrapValues.add(value);
-    log(formatCredentialTrace('bootstrap.affordance_forwarded', {
-      sessionId,
-      botId: larkAppIdForUpload,
-      result: value.startsWith('http') ? 'url' : 'device_code',
-    }));
-    send({ type: 'user_notify', message: `🔑 ${value}`, turnId: currentBotmuxTurnId });
   }
   if (/(?:二维码|scan\s+(?:the\s+)?qr|qr\s*code)/i.test(credentialBootstrapTail)
     || /[█▀▄]{4,}/.test(credentialBootstrapTail)) {
     scheduleCredentialBootstrapQrCapture();
   }
-  if (credentialBootstrapTail.includes('登录未完成或校验失败')
-    || credentialBootstrapTail.includes('凭证初始化等待超时')
-    || credentialBootstrapTail.includes('凭证初始化全部完成')) {
-    const completed = credentialBootstrapTail.includes('凭证初始化全部完成');
+  if (lifecycle === 'failed' || lifecycle === 'completed') {
+    const completed = lifecycle === 'completed';
     log(formatCredentialTrace(completed ? 'bootstrap.completed' : 'bootstrap.failed', {
       sessionId,
       botId: larkAppIdForUpload,
       result: completed ? 'ready' : 'failed',
       reason: completed ? undefined : 'login_incomplete_or_timeout',
     }));
-    credentialBootstrapActive = false;
+    // A failed bootstrap has no CLI behind it. Keep the ready gate closed until
+    // the automatic respawn resets state and starts a fresh bootstrap attempt.
+    if (completed) credentialBootstrapActive = false;
     if (credentialBootstrapQrTimer) {
       clearTimeout(credentialBootstrapQrTimer);
       credentialBootstrapQrTimer = null;
@@ -7851,6 +7846,16 @@ async function spawnCli(
 ): Promise<void> {
   clearSessionRenameInFlight();
   currentCliCredentialIsolated = false;
+  credentialBootstrapActive = false;
+  credentialBootstrapTail = '';
+  credentialBootstrapLoginUrl = '';
+  deliveredCredentialBootstrapLoginUrls.clear();
+  loggedCredentialBootstrapTraceLines.clear();
+  lastCredentialBootstrapQrHash = '';
+  if (credentialBootstrapQrTimer) {
+    clearTimeout(credentialBootstrapQrTimer);
+    credentialBootstrapQrTimer = null;
+  }
   // Enrollment writes the fixed marker before any device credential appears.
   // From that instant onward every NEW local CLI must carry a credential
   // boundary, regardless of adapter capability or optional sandbox toggles.
@@ -9583,6 +9588,7 @@ async function spawnCli(
         ...execCarve,
         ...credentialBootstraps.flatMap(spec => [
           dirname(spec.command),
+          ...(spec.command.includes('/node_modules/') ? [dirname(dirname(spec.command))] : []),
           ...(spec.checkCommand ? [dirname(spec.checkCommand.command)] : []),
         ]),
       ]),
@@ -10382,10 +10388,17 @@ async function spawnCli(
   })) {
     readyGate.arm();
     log('Ready gate armed — holding first prompt until SessionStart ready signal');
-    readySignalTimer = setTimeout(() => {
+    const onReadySignalTimeout = () => {
       readySignalTimer = null;
+      if (credentialBootstrapActive) {
+        log('Ready gate timeout deferred while credential bootstrap is active');
+        readySignalTimer = setTimeout(onReadySignalTimeout, READY_SIGNAL_TIMEOUT_MS);
+        readySignalTimer.unref?.();
+        return;
+      }
       releaseReadyGate('signal timeout fallback');
-    }, READY_SIGNAL_TIMEOUT_MS);
+    };
+    readySignalTimer = setTimeout(onReadySignalTimeout, READY_SIGNAL_TIMEOUT_MS);
     readySignalTimer.unref?.();
   }
 

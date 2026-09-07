@@ -17,6 +17,7 @@ export interface CredentialTraceFields {
   timeoutSeconds?: number;
   durationMs?: number;
   exitCode?: number;
+  errorCode?: string;
   signal?: string;
   sandbox?: boolean;
   hasCheck?: boolean;
@@ -44,6 +45,7 @@ const FIELD_ORDER: ReadonlyArray<keyof CredentialTraceFields> = [
   'timeoutSeconds',
   'durationMs',
   'exitCode',
+  'errorCode',
   'signal',
   'sandbox',
   'hasCheck',
@@ -71,6 +73,7 @@ const FIELD_NAMES: Record<keyof CredentialTraceFields, string> = {
   timeoutSeconds: 'timeout_s',
   durationMs: 'duration_ms',
   exitCode: 'exit_code',
+  errorCode: 'error_code',
   signal: 'signal',
   sandbox: 'sandbox',
   hasCheck: 'has_check',
@@ -113,4 +116,17 @@ export function formatCredentialTrace(event: string, fields: CredentialTraceFiel
     parts.push(`${FIELD_NAMES[key]}=${renderValue(key, value)}`);
   }
   return parts.join(' ');
+}
+
+export type CredentialBootstrapLifecycle = 'started' | 'completed' | 'failed';
+
+/** Read lifecycle only from runner-owned structured records. Login TUI output
+ * is repeatedly redrawn, so user-facing text is not a reliable state signal. */
+export function credentialBootstrapLifecycle(line: string): CredentialBootstrapLifecycle | undefined {
+  if (!line.startsWith('[owner-credential] event=bootstrap.')) return undefined;
+  if (line.includes('event=bootstrap.batch_started')) return 'started';
+  if (line.includes('event=bootstrap.batch_completed')) return 'completed';
+  if (line.includes('event=bootstrap.lock_timeout')
+    || (line.includes('event=bootstrap.validation_finished') && line.includes('result=failed'))) return 'failed';
+  return undefined;
 }

@@ -578,11 +578,12 @@ export function prepareDirectSandbox(opts: {
   const shim = join(shimBin, 'botmux');
   writeFileSync(shim, `#!/bin/sh\nexec node ${JSON.stringify(distCliJs())} "$@"\n`);
   chmodSync(shim, 0o755);
-  const devflowBootstrap = opts.credentialBootstraps?.find(spec => spec.id === 'devflow-auth');
-  if (devflowBootstrap) {
-    const devflowShim = join(shimBin, 'devflow-cli');
-    writeFileSync(devflowShim, `#!/bin/sh\nexec ${JSON.stringify(devflowBootstrap.command)} "$@"\n`);
-    chmodSync(devflowShim, 0o755);
+  for (const spec of opts.credentialBootstraps ?? []) {
+    const executableName = basename(spec.executableName);
+    if (!executableName || executableName === 'botmux') continue;
+    const credentialShim = join(shimBin, executableName);
+    writeFileSync(credentialShim, `#!/bin/sh\nexec ${JSON.stringify(spec.command)} "$@"\n`);
+    chmodSync(credentialShim, 0o755);
   }
 
   // usrmerge symlinks to replicate; deny rules that are FILES on the host need
@@ -746,8 +747,9 @@ export function prepareDirectSandbox(opts: {
     let runner = fileURLToPath(new URL('../../core/credential-bootstrap-runner.js', import.meta.url));
     try { runner = realpathSync(runner); } catch { /* source-tree tests have no dist .js yet */ }
     const nodeBin = realpathSync(process.execPath);
-    const encoded = Buffer.from(JSON.stringify(opts.credentialBootstraps), 'utf8').toString('base64url');
-    args.push('--', nodeBin, runner, encoded, execBin, ...opts.cliArgs);
+    const specFileName = 'credential-bootstraps.json';
+    writeFileSync(join(shimBin, specFileName), JSON.stringify(opts.credentialBootstraps), { mode: 0o600 });
+    args.push('--', nodeBin, runner, `@/run/sbxbin/${specFileName}`, execBin, ...opts.cliArgs);
   } else {
     args.push('--', execBin, ...opts.cliArgs);
   }

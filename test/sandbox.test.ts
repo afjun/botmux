@@ -153,6 +153,7 @@ describe('prepareDirectSandbox credential bootstrap wrapper', () => {
       chdir: dir, home: dir, cliBin: '/usr/bin/true', cliArgs: ['--version'],
       credentialBootstraps: [{
         id: 'demo',
+        executableName: 'demo',
         command: '/usr/bin/true',
         args: [],
         successPaths: ['/tmp/demo-ready'],
@@ -164,6 +165,9 @@ describe('prepareDirectSandbox credential bootstrap wrapper', () => {
     const dashDash = r.args.lastIndexOf('--');
     expect(r.args[dashDash + 1]).toBe(realpathSync(process.execPath));
     expect(r.args[dashDash + 2]).toContain('credential-bootstrap-runner.js');
+    expect(r.args[dashDash + 3]).toBe('@/run/sbxbin/credential-bootstraps.json');
+    const specFile = join(r.outbox, '..', 'shimbin', 'credential-bootstraps.json');
+    expect(JSON.parse(readFileSync(specFile, 'utf8'))[0]).toMatchObject({ id: 'demo' });
     expect(r.args[dashDash + 4]).toBe('/usr/bin/true');
     expect(r.args[dashDash + 5]).toBe('--version');
     r.cleanup();
@@ -179,6 +183,7 @@ describe('prepareDirectSandbox credential bootstrap wrapper', () => {
       chdir: dir, home: dir, cliBin: '/usr/bin/true', cliArgs: [],
       credentialBootstraps: [{
         id: 'devflow-auth', command: '/usr/bin/true', args: ['auth', 'update'],
+        executableName: 'devflow-cli',
         successPaths: [join(dir, 'cloud_jwt_token.txt')], timeoutSeconds: 30,
         lockPath: join(dir, 'devflow.lock'),
       }],
