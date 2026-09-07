@@ -5632,11 +5632,42 @@ function setupWorkerHandlers(
             config: { wide_screen_mode: true },
             elements: [
               {
-                tag: 'img',
-                img_key: msg.imageKey,
-                alt: { tag: 'plain_text', content: '登录二维码' },
-                mode: 'fit_horizontal',
-                preview: true,
+                tag: 'div',
+                text: { tag: 'plain_text', content: `请扫码登录 ${msg.toolName}` },
+              },
+              {
+                tag: 'column_set',
+                flex_mode: 'none',
+                horizontal_spacing: 'small',
+                columns: [
+                  {
+                    tag: 'column', width: 'weighted', weight: 3, vertical_align: 'center',
+                    elements: [{ tag: 'div', text: { tag: 'plain_text', content: ' ' } }],
+                  },
+                  {
+                    tag: 'column', width: 'weighted', weight: 2, vertical_align: 'center',
+                    elements: [{
+                      tag: 'interactive_container',
+                      width: 'fill',
+                      padding: '4px',
+                      background_style: 'default',
+                      has_border: true,
+                      border_color: 'grey-300',
+                      corner_radius: '8px',
+                      elements: [{
+                        tag: 'img',
+                        img_key: msg.imageKey,
+                        alt: { tag: 'plain_text', content: `${msg.toolName} 登录二维码` },
+                        mode: 'fit_horizontal',
+                        preview: true,
+                      }],
+                    }],
+                  },
+                  {
+                    tag: 'column', width: 'weighted', weight: 3, vertical_align: 'center',
+                    elements: [{ tag: 'div', text: { tag: 'plain_text', content: ' ' } }],
+                  },
+                ],
               },
               {
                 tag: 'action',

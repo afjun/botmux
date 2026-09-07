@@ -81,7 +81,11 @@ import {
   resolveCredentialBindMounts,
   resolvePendingCredentialBootstraps,
 } from './core/owner.js';
-import { credentialBootstrapLifecycle, formatCredentialTrace } from './core/credential-isolation-log.js';
+import {
+  credentialBootstrapLifecycle,
+  credentialBootstrapToolName as toolNameFromCredentialTrace,
+  formatCredentialTrace,
+} from './core/credential-isolation-log.js';
 import {
   evaluateVcMeetingManagedSend,
 } from './services/vc-meeting-send-policy.js';
@@ -1846,6 +1850,8 @@ let durableTurnInFlight = false;
 let credentialBootstrapActive = false;
 let credentialBootstrapTail = '';
 let credentialBootstrapLoginUrl = '';
+let credentialBootstrapToolName = '当前工具';
+const credentialBootstrapToolNamesByMount = new Map<string, string>();
 const deliveredCredentialBootstrapLoginUrls = new Set<string>();
 const loggedCredentialBootstrapTraceLines = new Set<string>();
 let credentialBootstrapQrTimer: ReturnType<typeof setTimeout> | null = null;
@@ -5014,6 +5020,7 @@ async function captureAndUploadCredentialBootstrapQr(): Promise<void> {
       type: 'credential_bootstrap_qr',
       imageKey,
       loginUrl,
+      toolName: credentialBootstrapToolName,
       turnId: currentBotmuxTurnId,
       dispatchAttempt: currentBotmuxDispatchAttempt,
     });
@@ -6124,6 +6131,8 @@ function maybeNotifyCredentialBootstrapOutput(data: string): void {
     loggedCredentialBootstrapTraceLines.add(trimmed);
     log(trimmed);
     lifecycle = credentialBootstrapLifecycle(trimmed) ?? lifecycle;
+    const mount = toolNameFromCredentialTrace(trimmed);
+    if (mount) credentialBootstrapToolName = credentialBootstrapToolNamesByMount.get(mount) ?? mount;
   }
   if (lifecycle === 'started') {
     if (!credentialBootstrapActive) {
@@ -7819,6 +7828,8 @@ async function spawnCli(
   credentialBootstrapActive = false;
   credentialBootstrapTail = '';
   credentialBootstrapLoginUrl = '';
+  credentialBootstrapToolName = '当前工具';
+  credentialBootstrapToolNamesByMount.clear();
   deliveredCredentialBootstrapLoginUrls.clear();
   loggedCredentialBootstrapTraceLines.clear();
   if (credentialBootstrapQrTimer) {
@@ -9443,6 +9454,9 @@ async function spawnCli(
             return locateOnPath(command) ?? undefined;
           },
         );
+        for (const spec of credentialBootstraps) {
+          credentialBootstrapToolNamesByMount.set(spec.id, spec.executableName);
+        }
       } catch (error) {
         log(formatCredentialTrace('bootstrap.plan_failed', {
           sessionId: cfg.sessionId,

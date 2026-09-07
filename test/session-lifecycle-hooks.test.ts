@@ -314,17 +314,37 @@ describe('worker-pool lifecycle hook integration', () => {
       type: 'credential_bootstrap_qr',
       imageKey: 'img_owner_login',
       loginUrl: 'https://login.example.com/device',
+      toolName: 'bytedcli',
     });
     await flush();
 
     expect(sessionReply).toHaveBeenCalledTimes(1);
     const [, content, msgType] = sessionReply.mock.calls[0];
     expect(msgType).toBe('interactive');
-    expect(JSON.parse(content)).toMatchObject({
-      elements: [
-        { tag: 'img', img_key: 'img_owner_login' },
-        { tag: 'action', actions: [{ multi_url: { url: 'https://login.example.com/device' } }] },
+    const card = JSON.parse(content);
+    expect(card.elements[0]).toMatchObject({
+      tag: 'div',
+      text: { tag: 'plain_text', content: '请扫码登录 bytedcli' },
+    });
+    expect(card.elements[1]).toMatchObject({
+      tag: 'column_set',
+      columns: [
+        { width: 'weighted', weight: 3 },
+        {
+          width: 'weighted',
+          weight: 2,
+          elements: [{
+            tag: 'interactive_container',
+            has_border: true,
+            elements: [{ tag: 'img', img_key: 'img_owner_login' }],
+          }],
+        },
+        { width: 'weighted', weight: 3 },
       ],
+    });
+    expect(card.elements[2]).toMatchObject({
+      tag: 'action',
+      actions: [{ multi_url: { url: 'https://login.example.com/device' } }],
     });
   });
 
