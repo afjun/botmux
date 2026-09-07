@@ -49,11 +49,12 @@ export function credentialBootstrapLeaseDirectory(botmuxHome: string, ownerId: s
  * durable write. Disabled configs deliberately return an empty object. */
 export function freezeCredentialIsolation(
   config: CredentialIsolationConfig | undefined,
-  identity: { openId?: string; email?: string } | undefined,
+  identity: { openId?: string; email?: string; name?: string } | undefined,
 ): Pick<Session, 'credentialPrincipal' | 'credentialIsolation' | 'sandbox'> {
   if (!config?.enabled) return {};
   const openId = identity?.openId?.trim();
-  const ownerId = ownerFromEmail(identity?.email);
+  const email = identity?.email?.trim().toLowerCase();
+  const ownerId = ownerFromEmail(email);
   if (!openId || !ownerId) {
     logger.warn(formatCredentialTrace('policy.freeze_failed', {
       openId,
@@ -70,11 +71,32 @@ export function freezeCredentialIsolation(
     count: config.mounts.length,
     sandbox: true,
   }));
+  const rawName = identity?.name?.trim();
+  const name = rawName && !/[\0\r\n]/.test(rawName) ? rawName : ownerId;
   return {
-    credentialPrincipal: { openId, ownerId },
+    credentialPrincipal: { openId, ownerId, email, name },
     credentialIsolation: { version: 1, mounts: config.mounts.map(cloneCredentialMount) },
     // Owner mounts are implemented only by the full Linux bwrap sandbox.
     sandbox: true,
+  };
+}
+
+/** Git author/committer attribution for a newly frozen owner session. Legacy
+ * sessions have no frozen email and deliberately retain their original Git
+ * environment until a new session is created. */
+export function credentialPrincipalGitEnv(
+  principal: Session['credentialPrincipal'] | undefined,
+): Record<string, string> {
+  if (!principal?.email) return {};
+  const email = principal.email.trim().toLowerCase();
+  if (/[\0\r\n\s]/.test(email) || ownerFromEmail(email) !== principal.ownerId) return {};
+  const rawName = principal.name?.trim();
+  const name = rawName && !/[\0\r\n]/.test(rawName) ? rawName : principal.ownerId;
+  return {
+    GIT_AUTHOR_NAME: name,
+    GIT_AUTHOR_EMAIL: email,
+    GIT_COMMITTER_NAME: name,
+    GIT_COMMITTER_EMAIL: email,
   };
 }
 

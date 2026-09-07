@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   CredentialOwnerRequiredError,
+  credentialPrincipalGitEnv,
   credentialPrincipalCanDrive,
   freezeCredentialIsolation,
   ownerDir,
@@ -57,10 +58,16 @@ describe('frozen credential isolation session state', () => {
     const frozen = freezeCredentialIsolation(config, {
       openId: 'ou_alice',
       email: 'alice@example.com',
+      name: 'Alice Zhang',
     });
     expect(frozen).toMatchObject({
       sandbox: true,
-      credentialPrincipal: { ownerId: 'alice', openId: 'ou_alice' },
+      credentialPrincipal: {
+        ownerId: 'alice',
+        openId: 'ou_alice',
+        email: 'alice@example.com',
+        name: 'Alice Zhang',
+      },
       credentialIsolation: { version: 1 },
     });
     expect(frozen.credentialIsolation?.mounts.map(mount => mount.id))
@@ -68,6 +75,24 @@ describe('frozen credential isolation session state', () => {
 
     config.mounts[0]!.ownerSubdir = 'mutated-live-config';
     expect(frozen.credentialIsolation?.mounts[0]?.ownerSubdir).toBe('bytedcli');
+  });
+
+  it('injects the frozen owner as both Git author and committer', () => {
+    expect(credentialPrincipalGitEnv({
+      ownerId: 'alice',
+      openId: 'ou_alice',
+      email: 'alice@example.com',
+      name: 'Alice Zhang',
+    })).toEqual({
+      GIT_AUTHOR_NAME: 'Alice Zhang',
+      GIT_AUTHOR_EMAIL: 'alice@example.com',
+      GIT_COMMITTER_NAME: 'Alice Zhang',
+      GIT_COMMITTER_EMAIL: 'alice@example.com',
+    });
+  });
+
+  it('does not invent Git identity for legacy principals without frozen email', () => {
+    expect(credentialPrincipalGitEnv({ ownerId: 'alice', openId: 'ou_alice' })).toEqual({});
   });
 
   it('resolves cross-bot reusable owner sources to concrete tool targets', () => {

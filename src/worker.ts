@@ -77,6 +77,7 @@ import { ReadyGate, shouldArmReadyGate } from './utils/ready-gate.js';
 import { shouldRunStartupCommandsOnSpawn, shouldDeferInitialPromptForStartup } from './core/startup-commands.js';
 import { sanitizePerBotEnv } from './core/per-bot-env.js';
 import {
+  credentialPrincipalGitEnv,
   credentialBootstrapLeaseDirectory,
   ensureCredentialBindSources,
   resolveCredentialBindMounts,
@@ -9186,13 +9187,29 @@ async function spawnCli(
   // merged into childEnv) so the tmux/zellij backends inject it via the per-pane
   // `/usr/bin/env` prefix and never into the shared backing-server global env,
   // keeping it from leaking across bots. Re-sanitized here (crossed IPC).
-  const perBotInjectEnv = sanitizePerBotEnv(cfg.env);
-  const perBotInjectKeys = Object.keys(perBotInjectEnv);
-  if (perBotInjectKeys.length) log(`Injecting ${perBotInjectKeys.length} per-bot env var(s): ${perBotInjectKeys.join(', ')}`);
+  const ownerGitEnv = ownerCredentialIsolation
+    ? credentialPrincipalGitEnv(cfg.credentialPrincipal)
+    : {};
+  const ownerGitIdentityEnabled = Object.keys(ownerGitEnv).length > 0;
+  const sessionInjectEnv = {
+    ...sanitizePerBotEnv(cfg.env),
+    ...ownerGitEnv,
+  };
+  const sessionInjectKeys = Object.keys(sessionInjectEnv);
+  if (sessionInjectKeys.length) log(`Injecting ${sessionInjectKeys.length} session env var(s): ${sessionInjectKeys.join(', ')}`);
+  if (ownerGitIdentityEnabled) {
+    log(formatCredentialTrace('git_identity.configured', {
+      sessionId: cfg.sessionId,
+      botId: cfg.larkAppId,
+      ownerId: cfg.credentialPrincipal!.ownerId,
+      result: 'ready',
+      source: 'verified_lark_identity',
+    }));
+  }
   const hermesUsesBotmuxSessionProfile = basename(cfg.cliPathOverride ?? '') === 'hermes-botmux-session';
   hermesBridgeDbPath = cfg.cliId === 'hermes'
     ? resolveHermesStateDbPath(
-      { ...childEnv, ...perBotInjectEnv },
+      { ...childEnv, ...sessionInjectEnv },
       { botmuxSessionProfile: hermesUsesBotmuxSessionProfile },
     )
     : undefined;
@@ -9692,6 +9709,11 @@ async function spawnCli(
         ]),
       ]),
       readonlyRoots: keepExisting([
+        // Temporary shared Git authentication: owner-isolated sessions reuse
+        // the host SSH key/config read-only, while commit attribution is frozen
+        // separately in GIT_AUTHOR_*/GIT_COMMITTER_* above. User deny rules can
+        // still close this path; non-isolated and legacy snapshots keep the old policy.
+        ...(ownerGitIdentityEnabled ? [`${sandboxHome}/.ssh`] : []),
         ...(cfg.skillReadonlyRoots ?? []),
         ...piInitialPromptReadonlyRoots,
         // Adapter-declared read-only host paths (e.g. traex/coco first-run
@@ -10113,7 +10135,7 @@ async function spawnCli(
       args: reproduceLaunch.args,
       cwd: spawnCwd,
       env: childEnv,
-      injectEnv: perBotInjectKeys.length ? perBotInjectEnv : undefined,
+      injectEnv: sessionInjectKeys.length ? sessionInjectEnv : undefined,
     });
   } catch (err: any) {
     capturedSpawnCommand = null;
@@ -10137,7 +10159,7 @@ async function spawnCli(
       cols: PTY_COLS,
       rows: PTY_ROWS,
       env: childEnv as Record<string, string>,
-      injectEnv: perBotInjectKeys.length ? perBotInjectEnv : undefined,
+      injectEnv: sessionInjectKeys.length ? sessionInjectEnv : undefined,
       launchShell: lastInitConfig?.launchShell,
     });
   } catch (error) {

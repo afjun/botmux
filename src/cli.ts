@@ -3181,7 +3181,7 @@ interface SessionData {
   webPort?: number;
   larkAppId?: string;
   ownerOpenId?: string;
-  credentialPrincipal?: { openId: string; ownerId: string };
+  credentialPrincipal?: { openId: string; ownerId: string; email?: string; name?: string };
   credentialIsolation?: { version: 1; mounts: unknown[] };
   creatorOpenId?: string;
   lastCallerOpenId?: string;

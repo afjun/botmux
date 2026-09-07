@@ -136,6 +136,10 @@ export interface Session {
   credentialPrincipal?: {
     ownerId: string;
     openId: string;
+    /** Verified Lark email frozen at session creation for owner-scoped tooling. */
+    email?: string;
+    /** Verified Lark display name; falls back to ownerId for Git attribution. */
+    name?: string;
   };
   /** Creation-time credential policy snapshot. Never rebuilt from live Bot
    * config during restore/restart, so config changes affect new sessions only. */

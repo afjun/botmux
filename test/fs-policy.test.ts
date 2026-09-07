@@ -665,6 +665,20 @@ describe('compileToBwrap', () => {
     }]);
   });
 
+  it('can expose host SSH credentials read-only for an owner-isolated session', () => {
+    const p = buildFsPolicy(ctx({
+      platform: 'linux', homeDir: '/home/u', botHome: '/home/u/.botmux/bots/cli_self',
+      botmuxHome: '/home/u/.botmux', sessionDataDir: '/home/u/.botmux/data', workingDir: '/home/u/proj',
+      readonlyRoots: ['/home/u/.ssh'],
+    }));
+
+    expect(accessForPath(p.rules, '/home/u/.ssh/id_ed25519').access).toBe('readOnly');
+    const { args } = compileToBwrap(p, opts);
+    expect(args.some((value, index) => value === '--ro-bind'
+      && args[index + 1] === '/home/u/.ssh'
+      && args[index + 2] === '/home/u/.ssh')).toBe(true);
+  });
+
   it('default: emits --unshare-pid (full process isolation) alongside the fresh --proc mount', () => {
     const p = buildFsPolicy(ctx({ platform: 'linux', homeDir: '/home/u', botHome: '/home/u/.botmux/bots/cli_self', botmuxHome: '/home/u/.botmux', sessionDataDir: '/home/u/.botmux/data', workingDir: '/home/u/proj' }));
     const { args } = compileToBwrap(p, opts);
