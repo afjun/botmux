@@ -575,6 +575,9 @@ export function addTask(params: {
   creatorChatId?: string;
   creatorRootMessageId?: string;
   creatorLarkAppId?: string;
+  credentialPrincipal?: ScheduledTask['credentialPrincipal'];
+  credentialIsolation?: ScheduledTask['credentialIsolation'];
+  sandbox?: boolean;
   parsed?: ParsedSchedule;
   repeat?: { times: number | null; completed: number };
   deliver?: 'origin' | 'local' | 'new-topic';
@@ -609,6 +612,9 @@ export function addTask(params: {
     creatorChatId: params.creatorChatId,
     creatorRootMessageId: params.creatorRootMessageId,
     creatorLarkAppId: params.creatorLarkAppId,
+    credentialPrincipal: params.credentialPrincipal,
+    credentialIsolation: params.credentialIsolation,
+    sandbox: params.sandbox,
     nextRunAt,
     repeat: params.repeat,
     // Delivery shape is now expressed by scope/rootMessageId. Persist only the

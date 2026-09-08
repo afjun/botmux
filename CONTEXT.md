@@ -33,6 +33,32 @@ for its triggering workflow node. Every resolved Webhook Owner, up to twenty
 in Meego order, is notified for every accepted event delivery.
 _Avoid_: sender identity, session owner
 
+**Credential Principal**:
+The first successfully resolved **Webhook Owner** in Meego order whose private
+login state is bound to a webhook-created **Session**. The normalized enterprise
+email prefix identifies the person across Bots so the same person reuses one
+login state; later Webhook Owners are notification recipients only.
+_Avoid_: webhook owner list, sender identity, session owner, open ID
+
+**Owner Credential Isolation**:
+An opt-in Bot policy that binds an isolated Session to its **Credential
+Principal** and that person's reusable login state. A Bot without this policy
+continues to use the host login state.
+_Avoid_: sender isolation, per-Bot credentials, notification ownership
+
+**Credential-Authorized Sender**:
+The **Credential Principal** whose messages may drive an Agent CLI in a Session
+protected by **Owner Credential Isolation**. Messages from every other person
+are rejected rather than executed with the principal's login state.
+_Avoid_: collaborator, notification recipient, any chat member
+
+**Credential Bootstrap**:
+The automatic initialization of a Credential Principal's missing login state
+before a protected Session begins its first Agent CLI turn. Botmux starts the
+login flow and publishes its authorization link or QR code in the originating
+conversation; the principal does not manually invoke setup commands.
+_Avoid_: manual shell setup, Agent CLI login, host login
+
 **Owner Notification**:
 The visible in-context notification attached to an accepted webhook event. It
 appears as a new topic's first message or within that event's existing Session.

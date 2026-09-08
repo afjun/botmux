@@ -10,7 +10,8 @@
 import { describe, it, expect } from 'vitest';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { mkdtempSync, existsSync, writeFileSync, readFileSync, symlinkSync, realpathSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, existsSync, writeFileSync, readFileSync, symlinkSync, realpathSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { buildRelayHostEnv, validateRelayRequest, materializeOutboxFile, prepareDirectSandbox, coreOnlyPidNamespaceDegrade, bwrapCanUnsharePid, pidNsDualProbeCanUnshare, __testOnly_resetPidNamespaceProbe } from '../src/adapters/backend/sandbox.js';
 import { createCodexAppAdapter } from '../src/adapters/cli/codex-app.js';
 
@@ -117,6 +118,26 @@ describe('coreOnlyPidNamespaceDegrade gate (credential-safety)', () => {
 // tmux pipe-pane fails). prepareDirectSandbox must realpath the bin so the exec
 // target lands on a bound path.
 describe('prepareDirectSandbox canonicalizes the exec bin (symlinked-$HOME)', () => {
+  it('reproduces the passwd-home symlink so OpenSSH can resolve ~/.ssh', () => {
+    if (process.platform !== 'linux') return;
+    const dir = mkdtempSync(join(tmpdir(), 'sbx-home-link-'));
+    const home = join(dir, 'canonical-home');
+    const lexicalHome = join(dir, 'lexical-home');
+    mkdirSync(home);
+    symlinkSync(home, lexicalHome);
+    const r = prepareDirectSandbox({
+      sessionId: 'home-link', dataDir: tmp(),
+      policy: { rules: [], net: true, writeRegexes: [] },
+      chdir: home, home, homeSymlink: { path: lexicalHome, target: home },
+      cliBin: '/usr/bin/true', cliArgs: [],
+    });
+    if (!r) return;
+    const symlinkAt = r.args.findIndex((value, index) => value === '--symlink'
+      && r.args[index + 1] === home && r.args[index + 2] === lexicalHome);
+    expect(symlinkAt).toBeGreaterThanOrEqual(0);
+    r.cleanup();
+  });
+
   it('replaces a symlinked cli bin path with its realpath in the bwrap argv', () => {
     if (process.platform !== 'linux') return; // bwrap path only built on linux
     const dir = mkdtempSync(join(tmpdir(), 'sbx-binlink-'));
@@ -139,6 +160,130 @@ describe('prepareDirectSandbox canonicalizes the exec bin (symlinked-$HOME)', ()
     expect(execTarget).toBe(realpathSync(linkBin)); // canonical, not the lexical symlink
     expect(execTarget).not.toBe(linkBin);
     expect(r.args.slice(dashDash + 2)).toEqual(['--v']); // cliArgs preserved verbatim
+    r.cleanup();
+  });
+});
+
+describe('prepareDirectSandbox credential bootstrap wrapper', () => {
+  it('runs bootstrap inside bwrap before the original CLI argv', () => {
+    if (process.platform !== 'linux') return;
+    const dir = tmp();
+    const leaseSource = join(dir, '.bootstrap');
+    mkdirSync(leaseSource);
+    const r = prepareDirectSandbox({
+      sessionId: 'credential-bootstrap', dataDir: tmp(),
+      policy: { rules: [], net: true, writeRegexes: [] },
+      chdir: dir, home: dir, cliBin: '/usr/bin/true', cliArgs: ['--version'],
+      credentialBootstraps: [{
+        id: 'demo',
+        executableName: 'demo',
+        command: '/usr/bin/true',
+        args: [],
+        successPaths: ['/tmp/demo-ready'],
+        timeoutSeconds: 30,
+      }],
+      credentialBootstrapLease: {
+        source: leaseSource, directory: '/run/botmux-owner-bootstrap',
+        sessionId: 'credential-bootstrap', sessionCreatedAt: '2026-09-06T11:25:00.000Z',
+      },
+    });
+    if (!r) return;
+    const dashDash = r.args.lastIndexOf('--');
+    expect(r.args[dashDash + 1]).toBe(realpathSync(process.execPath));
+    expect(r.args[dashDash + 2]).toContain('credential-bootstrap-runner.js');
+    expect(r.args[dashDash + 3]).toBe('@/run/sbxbin/credential-bootstraps.json');
+    const specFile = join(r.outbox, '..', 'shimbin', 'credential-bootstraps.json');
+    expect(JSON.parse(readFileSync(specFile, 'utf8')).bootstraps[0]).toMatchObject({ id: 'demo' });
+    expect(r.args).toContain('/run/botmux-owner-bootstrap');
+    expect(r.args[dashDash + 4]).toBe('/usr/bin/true');
+    expect(r.args[dashDash + 5]).toBe('--version');
+    r.cleanup();
+  });
+
+  it('injects a fresh bytedcli JWT when ByteCloud tools are invoked', () => {
+    if (process.platform !== 'linux') return;
+    const dataDir = tmp();
+    const dir = tmp();
+    const bytedcli = '/bin/echo';
+    const target = '/bin/sh';
+    const r = prepareDirectSandbox({
+      sessionId: 'shared-bytecloud-login', dataDir,
+      policy: { rules: [], net: true, writeRegexes: [] },
+      chdir: dir, home: dir, cliBin: '/usr/bin/true', cliArgs: [],
+      credentialJwtBridges: [{
+        executableName: 'bytecloud-cli',
+        command: target,
+        bytedcliCommand: bytedcli,
+      }],
+      isolateCredentialEnv: true,
+    });
+    if (!r) return;
+    const shimPath = join(
+      dataDir, 'sandboxes', 'shared-bytecloud-login', 'shimbin', 'bytecloud-cli',
+    );
+    const shim = readFileSync(shimPath, 'utf8');
+    expect(shim).toContain(`jwt=$('${bytedcli}' auth get-bytecloud-jwt-token)`);
+    expect(shim).toContain('unset BYTEDCLI_USER_CLOUD_JWT AIME_USER_CLOUD_JWT');
+    expect(shim).toContain('export BYTECLOUD_CLI_JWT_TOKEN="$jwt"');
+    expect(shim).toContain('export BYTECLOUD_CLI_API_JWT_TOKEN="$jwt"');
+    expect(shim).toContain('export AIME_USER_CLOUD_JWT="$jwt"');
+    expect(shim).toContain(`exec '${target}' "$@"`);
+    expect(shim).not.toContain('auth init');
+    for (const key of [
+      'BYTEDCLI_USER_CLOUD_JWT',
+      'AIME_USER_CLOUD_JWT',
+      'AGENTBUDDY_USER_CLOUD_JWT',
+      'BYTECLOUD_CLI_JWT_TOKEN',
+      'BYTECLOUD_CLI_API_JWT_TOKEN',
+      'SDMA_CLI_OPERATOR_JWT_PATH',
+    ]) {
+      expect(r.args).toContain(key);
+      const index = r.args.indexOf(key);
+      expect(r.args[index - 1]).toBe('--unsetenv');
+    }
+    const invoked = spawnSync('/bin/sh', [
+      shimPath, '-c', 'printf "token_set=%s\\nbytedcli_override=%s\\nagentbuddy_override=%s\\nsdma_path=%s\\n" "${BYTECLOUD_CLI_JWT_TOKEN:+yes}" "${BYTEDCLI_USER_CLOUD_JWT:+set}" "${AGENTBUDDY_USER_CLOUD_JWT:+set}" "${SDMA_CLI_OPERATOR_JWT_PATH:+set}"',
+    ], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        BYTEDCLI_USER_CLOUD_JWT: 'host-jwt',
+        AGENTBUDDY_USER_CLOUD_JWT: 'host-jwt',
+        SDMA_CLI_OPERATOR_JWT_PATH: '/host/token',
+      },
+    });
+    expect(invoked.status, `${invoked.error?.message ?? ''}\n${invoked.stderr}`).toBe(0);
+    expect(invoked.stdout).toBe(
+      'token_set=yes\nbytedcli_override=\nagentbuddy_override=\nsdma_path=\n',
+    );
+    expect(invoked.stderr).not.toContain('auth get-bytecloud-jwt-token');
+    expect(invoked.stderr).toContain('event=jwt_bridge.injected tool=bytecloud-cli result=ready');
+    r.cleanup();
+  });
+
+  it('publishes a devflow-cli shim that bypasses its host wrapper inside bwrap', () => {
+    if (process.platform !== 'linux') return;
+    const dataDir = tmp();
+    const dir = tmp();
+    const leaseSource = join(dir, '.bootstrap');
+    mkdirSync(leaseSource);
+    const r = prepareDirectSandbox({
+      sessionId: 'devflow-bootstrap', dataDir,
+      policy: { rules: [], net: true, writeRegexes: [] },
+      chdir: dir, home: dir, cliBin: '/usr/bin/true', cliArgs: [],
+      credentialBootstraps: [{
+        id: 'devflow-auth', command: '/usr/bin/true', args: ['auth', 'update'],
+        executableName: 'devflow-cli',
+        successPaths: [join(dir, 'cloud_jwt_token.txt')], timeoutSeconds: 30,
+      }],
+      credentialBootstrapLease: {
+        source: leaseSource, directory: '/run/botmux-owner-bootstrap',
+        sessionId: 'devflow-bootstrap', sessionCreatedAt: '2026-09-06T11:25:00.000Z',
+      },
+    });
+    if (!r) return;
+    const shim = join(dataDir, 'sandboxes', 'devflow-bootstrap', 'shimbin', 'devflow-cli');
+    expect(readFileSync(shim, 'utf8')).toContain('exec "/usr/bin/true" "$@"');
     r.cleanup();
   });
 });

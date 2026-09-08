@@ -2,6 +2,8 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { config } from '../config.js';
+import { logger } from '../utils/logger.js';
+import { formatCredentialTrace } from '../core/credential-isolation-log.js';
 
 export type ConnectorVerifyType = 'hmac-sha256' | 'token';
 export type ConnectorTargetMode = 'dynamic' | 'fixed' | 'new-group';
@@ -23,6 +25,18 @@ export interface ConnectorTopicMessageExtractor {
 export interface ConnectorMessageTemplate {
   text: string;
   extractors: Record<string, ConnectorTopicMessageExtractor>;
+}
+
+/** JSON paths used to discover ordered Credential Principal candidates in an
+ * untrusted webhook payload. Open IDs are verified later through the target
+ * Bot's Feishu contact API; the payload email is only a consistency hint. */
+export interface ConnectorCredentialOwnerExtractor {
+  /** Absolute payload path resolving to an array of candidate objects. */
+  path: string;
+  /** Path relative to each candidate (a leading `$.` is accepted). */
+  openIdPath: string;
+  /** Path relative to each candidate (a leading `$.` is accepted). */
+  emailPath: string;
 }
 
 export interface ConnectorDefinition {
@@ -69,6 +83,8 @@ export interface ConnectorDefinition {
   };
   /** Optional notification sent for every accepted webhook. */
   ownerNotification?: ConnectorMessageTemplate;
+  /** Optional ordered owner-candidate extractor for credential-isolated bots. */
+  credentialOwner?: ConnectorCredentialOwnerExtractor;
   /** When true, the daemon drops the trailing final_output reply for turns this
    *  webhook fires (the live streaming card / start notice still show). Lets a
    *  webhook that only needs the bot's in-topic `botmux send` output avoid the
@@ -161,6 +177,14 @@ export function upsertConnector(
   if (idx >= 0) store.connectors[idx] = next;
   else store.connectors.push(next);
   writeConnectorStore(dataDir, store);
+  if (next.credentialOwner || prior?.credentialOwner) {
+    logger.info(formatCredentialTrace('connector.owner_extractor_saved', {
+      botId: next.target.botId,
+      connectorId: next.id,
+      source: idx >= 0 ? 'connector_update' : 'connector_create',
+      result: next.credentialOwner ? 'configured' : 'cleared',
+    }));
+  }
   return next;
 }
 

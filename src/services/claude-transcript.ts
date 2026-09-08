@@ -95,6 +95,11 @@ export function isClaudeTurnTerminalEvent(ev: TranscriptEvent): boolean {
   if (ev.type === 'system' && ev.subtype === 'turn_duration') return true;
   const role = ev.message?.role ?? ev.type;
   if (role !== 'assistant') return false;
+  // Some Claude Code versions label a tool-call record as `end_turn`. The
+  // content shape is authoritative: Claude is still waiting for the tool
+  // result and continuation, so revoking this Botmux turn here would make all
+  // later sandbox-relayed sends fail with origin_mismatch.
+  if (hasToolUseBlock(ev)) return false;
   const reason = ev.message?.stop_reason;
   return typeof reason === 'string'
     && reason.length > 0

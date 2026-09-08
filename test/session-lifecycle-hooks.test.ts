@@ -1,8 +1,28 @@
 import { EventEmitter } from 'node:events';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { emitHookEventMock } = vi.hoisted(() => ({
+const {
+  emitHookEventMock,
+  activeCredentialBootstrapLeasesMock,
+  credentialBootstrapLeaseProcessAliveMock,
+  currentCredentialBootstrapLeaseMock,
+  removeCredentialBootstrapLeaseMock,
+  signalCredentialBootstrapLeaseProcessMock,
+} = vi.hoisted(() => ({
   emitHookEventMock: vi.fn(),
+  activeCredentialBootstrapLeasesMock: vi.fn(() => []),
+  credentialBootstrapLeaseProcessAliveMock: vi.fn(() => false),
+  currentCredentialBootstrapLeaseMock: vi.fn(),
+  removeCredentialBootstrapLeaseMock: vi.fn(),
+  signalCredentialBootstrapLeaseProcessMock: vi.fn(() => true),
+}));
+
+vi.mock('../src/core/credential-bootstrap-lease.js', () => ({
+  activeCredentialBootstrapLeases: (...args: unknown[]) => activeCredentialBootstrapLeasesMock(...args),
+  credentialBootstrapLeaseProcessAlive: (...args: unknown[]) => credentialBootstrapLeaseProcessAliveMock(...args),
+  currentCredentialBootstrapLease: (...args: unknown[]) => currentCredentialBootstrapLeaseMock(...args),
+  removeCredentialBootstrapLease: (...args: unknown[]) => removeCredentialBootstrapLeaseMock(...args),
+  signalCredentialBootstrapLeaseProcess: (...args: unknown[]) => signalCredentialBootstrapLeaseProcessMock(...args),
 }));
 
 vi.mock('../src/services/hook-runner.js', () => ({
@@ -36,6 +56,7 @@ vi.mock('../src/bot-registry.js', () => ({
     botName: 'TestBot',
   })),
   getAllBots: vi.fn(() => []),
+  resolveBrandLabel: vi.fn(() => 'EventBus'),
 }));
 
 vi.mock('../src/config.js', () => ({
@@ -167,6 +188,14 @@ async function flush(): Promise<void> {
 beforeEach(() => {
   vi.useRealTimers();
   vi.clearAllMocks();
+  currentCredentialBootstrapLeaseMock.mockReturnValue({
+    leaseId: 'lease-current',
+    sessionId: 'sid-lifecycle-test',
+    sessionCreatedAt: '2026-05-27T00:00:00.000Z',
+  });
+  activeCredentialBootstrapLeasesMock.mockReturnValue([]);
+  credentialBootstrapLeaseProcessAliveMock.mockReturnValue(false);
+  signalCredentialBootstrapLeaseProcessMock.mockReturnValue(true);
   __testOnly_resetSessionLifecycleHooks();
 });
 
@@ -296,6 +325,193 @@ describe('worker-pool lifecycle hook integration', () => {
       newState: 'idle',
       source: 'screenshot_uploaded',
     }));
+  });
+
+  it('delivers credential bootstrap QR and login URL in one interactive card', async () => {
+    const sessionReply = vi.fn(async () => 'om_reply');
+    initWorkerPool({
+      sessionReply,
+      getSessionWorkingDir: () => '/repo',
+      getActiveCount: () => 1,
+      closeSession: vi.fn(),
+    });
+    const worker = makeFakeWorker();
+    const ds = makeDs({
+      worker,
+      session: {
+        ...makeDs().session,
+        credentialPrincipal: { ownerId: 'owner', openId: 'ou_owner' },
+      },
+    });
+    __testOnly_setupWorkerHandlers(ds, worker);
+
+    worker.emit('message', {
+      type: 'credential_bootstrap_qr',
+      imageKey: 'img_owner_login',
+      loginUrl: 'https://login.example.com/device',
+      toolName: 'bytedcli',
+      leaseId: 'lease-current',
+    });
+    await flush();
+
+    expect(sessionReply).toHaveBeenCalledTimes(1);
+    const [, content, msgType] = sessionReply.mock.calls[0];
+    expect(msgType).toBe('interactive');
+    const card = JSON.parse(content);
+    expect(card).toMatchObject({ schema: '2.0', body: { direction: 'vertical' } });
+    expect(card.body.elements[0]).toMatchObject({
+      tag: 'markdown',
+      content: '请扫码登录 bytedcli',
+    });
+    expect(card.body.elements[1]).toMatchObject({
+      tag: 'column_set',
+      columns: [
+        {
+          width: 'weighted',
+          weight: 2,
+          elements: [{
+            tag: 'interactive_container',
+            has_border: true,
+            elements: [{ tag: 'img', img_key: 'img_owner_login' }],
+          }],
+        },
+        {
+          width: 'weighted',
+          weight: 6,
+          elements: [{ tag: 'markdown', content: ' ' }],
+        },
+      ],
+    });
+    expect(card.body.elements[2]).toMatchObject({
+      tag: 'column_set',
+      columns: [{
+        elements: [{
+          tag: 'button',
+          behaviors: [{ type: 'open_url', default_url: 'https://login.example.com/device' }],
+        }],
+      }],
+    });
+    expect(card.body.elements[3]).toEqual({ tag: 'hr' });
+    expect(card.body.elements[4]).toMatchObject({
+      tag: 'markdown',
+      element_id: 'botmux_reply_footer',
+      text_size: 'notation_small_v2',
+      content: expect.stringMatching(/EventBus.*发送给：<at id=ou_owner><\/at>/),
+    });
+  });
+
+  it('drops a delayed credential QR from a superseded session', async () => {
+    const sessionReply = vi.fn(async () => 'om_reply');
+    initWorkerPool({
+      sessionReply,
+      getSessionWorkingDir: () => '/repo',
+      getActiveCount: () => 1,
+      closeSession: vi.fn(),
+    });
+    currentCredentialBootstrapLeaseMock.mockReturnValue({
+      leaseId: 'lease-new',
+      sessionId: 'session-new',
+      sessionCreatedAt: '2026-05-28T00:00:00.000Z',
+    });
+    const worker = makeFakeWorker();
+    const ds = makeDs({
+      worker,
+      session: {
+        ...makeDs().session,
+        credentialPrincipal: { ownerId: 'owner', openId: 'ou_owner' },
+      },
+    });
+    __testOnly_setupWorkerHandlers(ds, worker);
+
+    worker.emit('message', {
+      type: 'credential_bootstrap_qr', imageKey: 'img-old',
+      loginUrl: 'https://login.example.com/old', toolName: 'bytedcli', leaseId: 'lease-old',
+    });
+    await flush();
+
+    expect(sessionReply).not.toHaveBeenCalled();
+  });
+
+  it('stops an older owner login when a newer session claims the lease', async () => {
+    const worker = makeFakeWorker();
+    const ds = makeDs({
+      worker,
+      session: {
+        ...makeDs().session,
+        credentialPrincipal: { ownerId: 'owner', openId: 'ou_owner' },
+      },
+    });
+    const older = {
+      leaseId: 'lease-old',
+      sessionId: 'session-old',
+      sessionCreatedAt: '2026-05-26T00:00:00.000Z',
+      runnerPid: 321,
+    };
+    activeCredentialBootstrapLeasesMock.mockReturnValue([older]);
+    __testOnly_setupWorkerHandlers(ds, worker);
+
+    worker.emit('message', { type: 'credential_bootstrap_lease_claimed', leaseId: 'lease-current' });
+    await flush();
+
+    expect(signalCredentialBootstrapLeaseProcessMock).toHaveBeenCalledWith(older, 'SIGTERM');
+  });
+
+  it('does not restart or notify when credential login moves to a newer session', async () => {
+    const sessionReply = vi.fn(async () => 'om_reply');
+    initWorkerPool({
+      sessionReply,
+      getSessionWorkingDir: () => '/repo',
+      getActiveCount: () => 1,
+      closeSession: vi.fn(),
+    });
+    const worker = makeFakeWorker();
+    const ds = makeDs({
+      worker,
+      session: { ...makeDs().session, credentialIsolation: { version: 1, mounts: [] } },
+    });
+    __testOnly_setupWorkerHandlers(ds, worker);
+
+    worker.emit('message', {
+      type: 'claude_exit', code: 79, signal: null, credentialBootstrapResult: 'superseded',
+    });
+    await flush();
+
+    expect(sessionReply).not.toHaveBeenCalled();
+    expect(worker.send).toHaveBeenCalledWith({ type: 'close' });
+  });
+
+  it('delivers credential login success without raising requires-attention', async () => {
+    const sessionReply = vi.fn(async () => 'om_reply');
+    initWorkerPool({
+      sessionReply,
+      getSessionWorkingDir: () => '/repo',
+      getActiveCount: () => 1,
+      closeSession: vi.fn(),
+    });
+    const worker = makeFakeWorker();
+    const ds = makeDs({ worker });
+    ds.session.credentialPrincipal = { ownerId: 'owner', openId: 'ou_owner' };
+    __testOnly_setupWorkerHandlers(ds, worker);
+
+    worker.emit('message', {
+      type: 'credential_bootstrap_succeeded',
+      message: '研发工具登录成功，bytecloud-cli 和 devflow 将复用 bytedcli 身份。',
+      leaseId: 'lease-current',
+    });
+    await flush();
+
+    expect(sessionReply).toHaveBeenCalledWith(
+      'om_root',
+      '研发工具登录成功，bytecloud-cli 和 devflow 将复用 bytedcli 身份。',
+      'text',
+      'app_test',
+      undefined,
+      undefined,
+    );
+    expect(emitHookEventMock).not.toHaveBeenCalledWith(
+      'session.requires_attention',
+      expect.anything(),
+    );
   });
 
   it('emits session.requires_attention from tui_prompt and user_notify IPC', async () => {

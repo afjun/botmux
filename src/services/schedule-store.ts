@@ -22,6 +22,7 @@ import { withFileLockSync } from '../utils/file-lock.js';
 import { fsyncDirectorySyncPortable } from '../utils/fs-durability.js';
 import { botHomePath } from '../adapters/cli/read-isolation.js';
 import type { ScheduledTask, ParsedSchedule, ScheduleExecutionPosition } from '../types.js';
+import { formatCredentialTrace } from '../core/credential-isolation-log.js';
 
 // ─── Idempotency types (events doc v0.1.2 §2.2) ─────────────────────────────
 
@@ -85,6 +86,9 @@ export function canonicalScheduleInput(t: {
   executionPosition?: ScheduleExecutionPosition;
   topicTitle?: string;
   larkAppId?: string;
+  credentialPrincipal?: ScheduledTask['credentialPrincipal'];
+  credentialIsolation?: ScheduledTask['credentialIsolation'];
+  sandbox?: boolean;
   repeat?: { times: number | null; completed?: number };
   deliver?: 'origin' | 'local' | 'new-topic';
   silent?: boolean;
@@ -114,6 +118,12 @@ export function canonicalScheduleInput(t: {
     executionPosition: t.executionPosition,
     topicTitle: t.topicTitle,
     larkAppId: t.larkAppId,
+    // These fields determine which host credentials a future execution can
+    // see. Treat them as immutable task input so an idempotent retry cannot
+    // silently reuse a task captured for another owner or sandbox policy.
+    credentialPrincipal: t.credentialPrincipal,
+    credentialIsolation: t.credentialIsolation,
+    sandbox: t.sandbox === true ? true : undefined,
     // Strip `completed` — it mutates after the task starts running, but
     // `times` is the durable user intent.
     repeat: t.repeat ? { times: t.repeat.times } : undefined,
@@ -258,6 +268,9 @@ function migrate(raw: any): ScheduledTask | null {
     creatorChatId: raw.creatorChatId,
     creatorRootMessageId: raw.creatorRootMessageId,
     creatorLarkAppId: raw.creatorLarkAppId,
+    credentialPrincipal: raw.credentialPrincipal,
+    credentialIsolation: raw.credentialIsolation,
+    sandbox: raw.sandbox === true ? true : undefined,
     enabled: raw.enabled !== false,
     createdAt: raw.createdAt,
     lastRunAt: raw.lastRunAt,
@@ -470,6 +483,9 @@ export function createTask(params: {
   creatorChatId?: string;
   creatorRootMessageId?: string;
   creatorLarkAppId?: string;
+  credentialPrincipal?: ScheduledTask['credentialPrincipal'];
+  credentialIsolation?: ScheduledTask['credentialIsolation'];
+  sandbox?: boolean;
   nextRunAt?: string;
   repeat?: { times: number | null; completed: number };
   deliver?: 'origin' | 'local' | 'new-topic';
@@ -523,6 +539,9 @@ export function createTask(params: {
       creatorChatId: params.creatorChatId,
       creatorRootMessageId: params.creatorRootMessageId,
       creatorLarkAppId: params.creatorLarkAppId,
+      credentialPrincipal: params.credentialPrincipal,
+      credentialIsolation: params.credentialIsolation,
+      sandbox: params.sandbox,
       enabled: true,
       createdAt: new Date().toISOString(),
       nextRunAt: params.nextRunAt,
@@ -533,6 +552,18 @@ export function createTask(params: {
       silent: params.silent === true ? true : undefined,
     };
     working.set(task.id, task);
+    if (task.credentialPrincipal || task.credentialIsolation) {
+      logger.info(formatCredentialTrace('schedule.policy_frozen', {
+        taskId: task.id,
+        botId: task.larkAppId,
+        ownerId: task.credentialPrincipal?.ownerId,
+        openId: task.credentialPrincipal?.openId,
+        source: 'schedule_create',
+        result: task.credentialPrincipal && task.credentialIsolation ? 'frozen' : 'incomplete',
+        count: task.credentialIsolation?.mounts.length,
+        sandbox: task.sandbox,
+      }));
+    }
     return { result: task, changed: true };
   }, params.larkAppId);
 }

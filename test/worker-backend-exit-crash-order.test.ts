@@ -26,7 +26,7 @@ describe('worker backend exit crash ordering', () => {
     const clearDurable = callback.indexOf('durableTurnInFlight = false;');
     const stashInflight = callback.indexOf('inflightInputs.onCliExit');
     const clearBackend = callback.indexOf('backend = null;');
-    const emitExit = callback.indexOf("send({ type: 'claude_exit'");
+    const emitExit = callback.indexOf("type: 'claude_exit'");
 
     expect(clearIntentional).toBeGreaterThanOrEqual(0);
     expect(identityFence).toBeGreaterThan(clearIntentional);

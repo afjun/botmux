@@ -24,10 +24,11 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, rmdirSync, writeFileSync, mkdirSync, chmodSync, realpathSync, existsSync, statSync, lstatSync, readlinkSync } from 'node:fs';
+import { mkdtempSync, rmSync, rmdirSync, writeFileSync, readFileSync, mkdirSync, chmodSync, realpathSync, existsSync, statSync, lstatSync, readlinkSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { buildFsPolicy, compileToBwrap } from '../src/adapters/cli/fs-policy.js';
+import { prepareOwnerPlaywrightMcp } from '../src/core/owner-playwright-mcp.js';
 
 const bwrapUsable = process.platform === 'linux'
   && spawnSync('sh', ['-c', 'command -v bwrap'], { stdio: 'ignore' }).status === 0
@@ -50,7 +51,11 @@ d('bwrap three-tier enforcement (real bubblewrap)', () => {
   // Build the bwrap argv the SAME way the worker does (deny masks: mode-000
   // empty sources, missing mountpoints pre-created). Returns the created-mask
   // list too so cleanup tests can assert rmdir-if-empty.
-  function build(userPaths: { readWrite?: string[]; readOnly?: string[]; deny?: string[] }) {
+  function build(
+    userPaths: { readWrite?: string[]; readOnly?: string[]; deny?: string[] },
+    credentialMounts?: Array<{ source: string; target: string; kind: 'directory' | 'file' }>,
+    readonlyRoots?: string[],
+  ) {
     const emptiesDir = join(S, 'sbx/empties');
     const emptyDir = join(S, 'sbx/empty');
     mkdirSync(emptiesDir, { recursive: true });
@@ -63,7 +68,9 @@ d('bwrap three-tier enforcement (real bubblewrap)', () => {
       workingDir: join(S, 'proj'), currentAppId: 'cli_e2e', botHome: join(S, 'botmux-home/bots/cli_e2e'),
       redirectedCliData: true,
       execPaths: [dirname(canonical(process.execPath))],
+      readonlyRoots,
       userPaths: { readOnly: [join(S, 'ref'), ...(userPaths.readOnly ?? [])], readWrite: userPaths.readWrite, deny: userPaths.deny },
+      credentialMounts,
       net: true, writeRegexes: [],
     });
     policy.rules = policy.rules.filter(r => r.access === 'deny' || existsSync(r.path));
@@ -79,9 +86,16 @@ d('bwrap three-tier enforcement (real bubblewrap)', () => {
     }
     const compiled = compileToBwrap(policy, { symlinks, emptyDir, emptiesDir, filePaths, chdir: join(S, 'proj') });
     chmodSync(emptyDir, 0o000);
-    for (const f of compiled.emptyFiles) writeFileSync(f.path, '', { mode: 0o000 });
+    for (const f of compiled.emptyFiles) {
+      try { chmodSync(f.path, 0o600); } catch { /* first build */ }
+      writeFileSync(f.path, '', { mode: 0o000 });
+      chmodSync(f.path, 0o000);
+    }
     // Mirror the worker: pre-create missing mask mountpoints (leaf + ancestors).
     const created: { path: string; kind: 'dir' | 'file' }[] = [];
+    for (const m of compiled.bindMounts) {
+      if (!existsSync(m.target)) mkdirSync(m.target, { recursive: true });
+    }
     for (const m of compiled.maskMounts) {
       if (existsSync(m.path)) continue;
       if (m.kind === 'file') { mkdirSync(dirname(m.path), { recursive: true }); writeFileSync(m.path, ''); }
@@ -118,6 +132,42 @@ d('bwrap three-tier enforcement (real bubblewrap)', () => {
     const { args } = build({});
     expect(run(args, `cat ${JSON.stringify(join(S, 'ref/doc.md'))}`).status).toBe(0);
     expect(run(args, `echo x > ${JSON.stringify(join(S, 'ref/hack'))}`).status).not.toBe(0);
+  });
+
+  it('credential bind exposes the owner source at the tool target and writes back only to that source', () => {
+    const source = join(S, 'owners/alice/bytedcli');
+    const target = join(S, 'proj/home/.local/share/bytedcli');
+    mkdirSync(source, { recursive: true });
+    mkdirSync(target, { recursive: true });
+    writeFileSync(join(source, 'identity'), 'ALICE');
+    writeFileSync(join(target, 'host-identity'), 'HOST');
+    const { args } = build({}, [{ source, target, kind: 'directory' }]);
+
+    expect(run(args, `cat ${JSON.stringify(join(target, 'identity'))}`).out).toContain('ALICE');
+    expect(run(args, `cat ${JSON.stringify(join(target, 'host-identity'))}`).out).not.toContain('HOST');
+    expect(run(args, `echo refreshed > ${JSON.stringify(join(target, 'token'))}`).status).toBe(0);
+    expect(readFileSync(join(source, 'token'), 'utf8').trim()).toBe('refreshed');
+    expect(existsSync(join(target, 'token'))).toBe(false);
+  });
+
+  it('owner Playwright config is read-only while profile writes land in the owner bind', () => {
+    const source = join(S, 'owners/alice/playwright');
+    const target = join(S, 'proj/home/.cache/ms-playwright-mcp');
+    mkdirSync(source, { recursive: true });
+    mkdirSync(target, { recursive: true });
+    const plan = prepareOwnerPlaywrightMcp({
+      sessionId: 'e2e-session', dataDir: join(S, 'botmux-home/data'),
+      claudeFamily: true, freshProcess: true, ownerCredentialIsolation: true,
+      mounts: [{ id: 'playwright', kind: 'directory', ownerSubdir: 'playwright', source, target }],
+      resolveCommand: command => command === 'playwright-mcp' ? '/bin/true' : null,
+    });
+    expect(plan.status).toBe('configured');
+    if (plan.status !== 'configured') return;
+    const { args } = build({}, [{ source, target, kind: 'directory' }], plan.readonlyRoots);
+    expect(run(args, `cat ${JSON.stringify(plan.configPath)}`).out).toContain('LocalNetworkAccessChecks');
+    expect(run(args, `mkdir -p ${JSON.stringify(plan.profileDir)} && echo login > ${JSON.stringify(join(plan.profileDir, 'state'))}`).status).toBe(0);
+    expect(readFileSync(join(source, 'profile/state'), 'utf8').trim()).toBe('login');
+    expect(run(args, `echo tamper >> ${JSON.stringify(plan.configPath)}`).status).not.toBe(0);
   });
 
   it('deny DIR (existing): real content unreadable, and mask empty/unlistable for non-root (root may list but sees nothing real)', () => {

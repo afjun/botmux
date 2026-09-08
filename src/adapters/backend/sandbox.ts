@@ -29,6 +29,29 @@ import {
   MCP_GATEWAY_REQUIRED_ENV,
   MCP_GATEWAY_SOCKET_ENV,
 } from '../../core/plugins/mcp/environment.js';
+import type {
+  CredentialBootstrapLeaseSpec,
+  CredentialBootstrapRunnerSpec,
+} from '../../core/credential-bootstrap-runner.js';
+
+export interface CredentialJwtBridgeSpec {
+  executableName: string;
+  command: string;
+  bytedcliCommand: string;
+}
+
+const OWNER_CREDENTIAL_ENV_KEYS = [
+  'BYTEDCLI_USER_CLOUD_JWT',
+  'AIME_USER_CLOUD_JWT',
+  'AGENTBUDDY_USER_CLOUD_JWT',
+  'BYTECLOUD_CLI_JWT_TOKEN',
+  'BYTECLOUD_CLI_API_JWT_TOKEN',
+  'SDMA_CLI_OPERATOR_JWT_PATH',
+] as const;
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
 
 /** Verify (and best-effort auto-install) bubblewrap so the user needn't
  *  pre-install. Installs via the system package manager when the daemon can
@@ -548,8 +571,21 @@ export function prepareDirectSandbox(opts: {
   chdir: string;
   /** Canonical $HOME to set for the child. */
   home: string;
+  /** Host passwd-home symlink to reproduce inside the fresh root. OpenSSH uses
+   * passwd home rather than $HOME when expanding ~/.ssh. */
+  homeSymlink?: { path: string; target: string };
   cliBin: string;
   cliArgs: string[];
+  /** Missing credential bootstraps to execute inside this exact bwrap namespace
+   * before the real CLI is started. */
+  credentialBootstraps?: readonly CredentialBootstrapRunnerSpec[];
+  credentialBootstrapLease?: CredentialBootstrapLeaseSpec & { source: string };
+  /** Tool shims that obtain a fresh ByteCloud JWT from the isolated bytedcli
+   * identity for every invocation. */
+  credentialJwtBridges?: readonly CredentialJwtBridgeSpec[];
+  /** Remove daemon/host auth overrides at the bwrap boundary. Consumer shims
+   * re-export only the JWT derived from the mounted owner identity. */
+  isolateCredentialEnv?: boolean;
   /** Absolute Botmux command paths already persisted in CLI MCP configs.
    * Bind the worker-generated relay shim at those exact paths so a stale or
    * tampered host wrapper cannot replace the trusted gateway entry. */
@@ -574,6 +610,37 @@ export function prepareDirectSandbox(opts: {
   const shim = join(shimBin, 'botmux');
   writeFileSync(shim, `#!/bin/sh\nexec node ${JSON.stringify(distCliJs())} "$@"\n`);
   chmodSync(shim, 0o755);
+  for (const spec of opts.credentialBootstraps ?? []) {
+    const executableName = basename(spec.executableName);
+    if (!executableName || executableName === 'botmux') continue;
+    const credentialShim = join(shimBin, executableName);
+    writeFileSync(credentialShim, `#!/bin/sh\nexec ${JSON.stringify(spec.command)} "$@"\n`);
+    chmodSync(credentialShim, 0o755);
+  }
+  for (const bridge of opts.credentialJwtBridges ?? []) {
+    const executableName = basename(bridge.executableName);
+    if (!executableName || executableName === 'botmux') continue;
+    const credentialShim = join(shimBin, executableName);
+    writeFileSync(credentialShim, `#!/bin/sh
+printf '%s\\n' '[owner-credential] event=jwt_bridge.started tool=${executableName}' >&2
+unset ${OWNER_CREDENTIAL_ENV_KEYS.join(' ')}
+jwt=$(${shellQuote(bridge.bytedcliCommand)} auth get-bytecloud-jwt-token) || {
+  status=$?
+  printf '%s\\n' "[owner-credential] event=jwt_bridge.token_failed tool=${executableName} exit_code=$status" >&2
+  exit "$status"
+}
+if [ -z "$jwt" ]; then
+  printf '%s\\n' '[owner-credential] event=jwt_bridge.token_failed tool=${executableName} reason=empty_token' >&2
+  exit 1
+fi
+export BYTECLOUD_CLI_JWT_TOKEN="$jwt"
+export BYTECLOUD_CLI_API_JWT_TOKEN="$jwt"
+export AIME_USER_CLOUD_JWT="$jwt"
+printf '%s\\n' '[owner-credential] event=jwt_bridge.injected tool=${executableName} result=ready' >&2
+exec ${shellQuote(bridge.command)} "$@"
+`);
+    chmodSync(credentialShim, 0o755);
+  }
 
   // usrmerge symlinks to replicate; deny rules that are FILES on the host need
   // a file-shaped mask, everything else (existing dir OR a not-yet-existing
@@ -586,6 +653,7 @@ export function prepareDirectSandbox(opts: {
       if (lstatSync(p).isSymbolicLink()) symlinks.push({ path: p, target: readlinkSync(p) });
     } catch { /* absent on this distro */ }
   }
+  if (opts.homeSymlink) symlinks.push(opts.homeSymlink);
   const filePaths = new Set<string>();
   for (const r of opts.policy.rules) {
     if (r.access !== 'deny') continue;
@@ -620,6 +688,22 @@ export function prepareDirectSandbox(opts: {
   // record to reclaim them.
   const createdMasks: MaskMountEntry[] = [];
   try {
+    for (const mount of compiled.bindMounts) {
+      const sourceStat = lstatSync(mount.source);
+      if (sourceStat.isSymbolicLink()
+        || (mount.kind === 'dir' ? !sourceStat.isDirectory() : !sourceStat.isFile())) {
+        throw new Error(`credential bind source has wrong shape: ${mount.source}`);
+      }
+      if (existsSync(mount.target)) {
+        const targetStat = lstatSync(mount.target);
+        if (targetStat.isSymbolicLink()
+          || (mount.kind === 'dir' ? !targetStat.isDirectory() : !targetStat.isFile())) {
+          throw new Error(`credential bind target has wrong shape: ${mount.target}`);
+        }
+      } else {
+        createMaskMount(mount.target, mount.kind, createdMasks);
+      }
+    }
     for (const m of compiled.maskMounts) {
       // createMaskMount pushes each level into createdMasks IMMEDIATELY, so a
       // mid-chain throw still leaves the partial ancestors visible for rollback.
@@ -637,6 +721,14 @@ export function prepareDirectSandbox(opts: {
   }
 
   const args = [...compiled.args];
+  if (opts.credentialBootstrapLease) {
+    const source = assertCredentialIsolationPath(opts.credentialBootstrapLease.source, 'bootstrap lease source');
+    const stat = lstatSync(source);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) {
+      throw new Error(`credential bootstrap lease source has wrong shape: ${source}`);
+    }
+    args.push('--bind', source, opts.credentialBootstrapLease.directory);
+  }
   // Shim bin at a fixed path under the fresh /run tmpfs — appended after the
   // rule mounts (later mount wins over the tmpfs). PATH points here first.
   args.push('--ro-bind', shimBin, '/run/sbxbin');
@@ -705,6 +797,9 @@ export function prepareDirectSandbox(opts: {
   }
   args.push('--unsetenv', 'BOTS_CONFIG');
   args.push('--unsetenv', 'BOTMUX_HOST_RELAY_AUTHORIZED');
+  if (opts.isolateCredentialEnv) {
+    for (const key of OWNER_CREDENTIAL_ENV_KEYS) args.push('--unsetenv', key);
+  }
   for (const [k, v] of Object.entries(env)) args.push('--setenv', k, v);
   // Canonicalize the CLI binary before execvp: on a symlinked-$HOME host
   // (e.g. /home/u → /data00/home/u shared-drive mount) the worker hands us the
@@ -716,7 +811,24 @@ export function prepareDirectSandbox(opts: {
   // unresolvable path falls back to the lexical form (bwrap will fail-closed).
   let execBin = opts.cliBin;
   try { execBin = realpathSync(opts.cliBin); } catch { /* keep lexical; spawn fails closed */ }
-  args.push('--', execBin, ...opts.cliArgs);
+  if (opts.credentialBootstraps?.length) {
+    let runner = fileURLToPath(new URL('../../core/credential-bootstrap-runner.js', import.meta.url));
+    try { runner = realpathSync(runner); } catch { /* source-tree tests have no dist .js yet */ }
+    const nodeBin = realpathSync(process.execPath);
+    const specFileName = 'credential-bootstraps.json';
+    if (!opts.credentialBootstrapLease) throw new Error('credential bootstrap lease is required');
+    writeFileSync(join(shimBin, specFileName), JSON.stringify({
+      bootstraps: opts.credentialBootstraps,
+      lease: {
+        directory: opts.credentialBootstrapLease.directory,
+        sessionId: opts.credentialBootstrapLease.sessionId,
+        sessionCreatedAt: opts.credentialBootstrapLease.sessionCreatedAt,
+      },
+    }), { mode: 0o600 });
+    args.push('--', nodeBin, runner, `@/run/sbxbin/${specFileName}`, execBin, ...opts.cliArgs);
+  } else {
+    args.push('--', execBin, ...opts.cliArgs);
+  }
 
   return {
     bin: 'bwrap',

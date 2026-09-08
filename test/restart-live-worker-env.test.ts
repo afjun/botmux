@@ -208,7 +208,10 @@ describe('worker restart case merges env into lastInitConfig (source pin)', () =
   });
 
   it('spawnCli re-derives the inject set from cfg.env on every spawn (no cached copy)', () => {
-    const spawnCfg = workerSource.indexOf('const perBotInjectEnv = sanitizePerBotEnv(cfg.env);');
+    const injectSetAt = workerSource.indexOf('const sessionInjectEnv = {');
+    expect(injectSetAt).toBeGreaterThanOrEqual(0);
+    const injectSet = workerSource.slice(injectSetAt);
+    const spawnCfg = injectSet.indexOf('...sanitizePerBotEnv(cfg.env),');
     expect(spawnCfg).toBeGreaterThanOrEqual(0);
   });
 });

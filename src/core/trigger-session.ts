@@ -18,6 +18,12 @@ import type { DaemonSession } from './types.js';
 import { sessionKey, larkTransportEnabled, isHttpVirtualSession } from './types.js';
 import type { TriggerRequest, TriggerResponse } from '../services/trigger-types.js';
 import type { CliTurnPayload } from '../types.js';
+import { getConnector } from '../services/connector-store.js';
+import { extractCredentialOwnerCandidates } from '../services/credential-owner-extractor.js';
+import { resolveSender, type ResolvedSender } from '../im/lark/identity-cache.js';
+import { freezeCredentialIsolation, ownerFromEmail } from './owner.js';
+import { formatCredentialTrace } from './credential-isolation-log.js';
+import { logger } from '../utils/logger.js';
 
 export interface TriggerSessionDeps {
   larkAppId: string;
@@ -201,6 +207,89 @@ function activeBySessionId(activeSessions: Map<string, DaemonSession>, sessionId
   for (const ds of activeSessions.values()) {
     if (ds.session.sessionId === sessionId) return ds;
   }
+  return undefined;
+}
+
+async function resolveWebhookCredentialOwner(
+  req: TriggerRequest,
+  larkAppId: string,
+): Promise<ResolvedSender | undefined> {
+  if (req.source.type !== 'webhook' || !req.source.connectorId) return undefined;
+  const connector = getConnector(req.source.connectorId);
+  if (!connector || connector.target.botId !== larkAppId) {
+    logger.warn(formatCredentialTrace('webhook_owner.connector_rejected', {
+      botId: larkAppId,
+      connectorId: req.source.connectorId,
+      result: 'rejected',
+      reason: !connector ? 'connector_not_found' : 'target_bot_mismatch',
+    }));
+    return undefined;
+  }
+  const candidates = extractCredentialOwnerCandidates(req.envelope.payload, connector.credentialOwner);
+  logger.info(formatCredentialTrace('webhook_owner.candidates_extracted', {
+    botId: larkAppId,
+    connectorId: req.source.connectorId,
+    result: candidates.length > 0 ? 'ready' : 'empty',
+    count: candidates.length,
+  }));
+  for (let index = 0; index < candidates.length; index++) {
+    const candidate = candidates[index];
+    let sender: ResolvedSender | undefined;
+    try {
+      sender = await resolveSender(larkAppId, candidate.openId, 'user');
+    } catch (error) {
+      logger.warn(formatCredentialTrace('webhook_owner.lookup_failed', {
+        botId: larkAppId,
+        connectorId: req.source.connectorId,
+        openId: candidate.openId,
+        result: 'error',
+        reason: error instanceof Error ? error.message : String(error),
+        attempt: index + 1,
+      }));
+      throw error;
+    }
+    if (!sender?.email) {
+      logger.info(formatCredentialTrace('webhook_owner.candidate_rejected', {
+        botId: larkAppId,
+        connectorId: req.source.connectorId,
+        openId: candidate.openId,
+        result: 'rejected',
+        reason: sender ? 'contact_email_missing' : 'contact_not_resolved',
+        attempt: index + 1,
+      }));
+      continue;
+    }
+    const payloadOwnerId = ownerFromEmail(candidate.email);
+    const contactOwnerId = ownerFromEmail(sender.email);
+    if (!payloadOwnerId || payloadOwnerId !== contactOwnerId) {
+      logger.info(formatCredentialTrace('webhook_owner.candidate_rejected', {
+        botId: larkAppId,
+        connectorId: req.source.connectorId,
+        ownerId: payloadOwnerId,
+        openId: candidate.openId,
+        result: 'rejected',
+        reason: 'email_prefix_mismatch',
+        attempt: index + 1,
+      }));
+      continue;
+    }
+    logger.info(formatCredentialTrace('webhook_owner.resolved', {
+      botId: larkAppId,
+      connectorId: req.source.connectorId,
+      ownerId: contactOwnerId,
+      openId: sender.openId,
+      result: 'accepted',
+      attempt: index + 1,
+    }));
+    return sender;
+  }
+  logger.warn(formatCredentialTrace('webhook_owner.unresolved', {
+    botId: larkAppId,
+    connectorId: req.source.connectorId,
+    result: 'rejected',
+    reason: candidates.length ? 'no_verified_candidate' : 'no_valid_candidate',
+    count: candidates.length,
+  }));
   return undefined;
 }
 
@@ -469,6 +558,70 @@ export async function triggerSessionTurn(
     ds = deps.activeSessions.get(sessionKey(chatId, larkAppId));
   }
 
+  const bot = getBot(larkAppId);
+  let newSessionCredentialState: ReturnType<typeof freezeCredentialIsolation> = {};
+  if ((!ds && bot.config.credentialIsolation?.enabled) || ds?.session.credentialIsolation) {
+    const credentialOwner = await resolveWebhookCredentialOwner(req, larkAppId);
+    if (!credentialOwner) {
+      logger.warn(formatCredentialTrace('session.owner_required', {
+        sessionId: ds?.session.sessionId,
+        botId: larkAppId,
+        connectorId: req.source.connectorId,
+        source: 'webhook',
+        result: 'rejected',
+        reason: 'verified_owner_unavailable',
+      }));
+      return {
+        ok: false,
+        triggerId,
+        errorCode: 'credential_owner_required',
+        error: 'credential-isolated session requires a verified webhook owner',
+      };
+    }
+    if (ds?.session.credentialPrincipal
+      && ds.session.credentialPrincipal.openId !== credentialOwner.openId) {
+      logger.warn(formatCredentialTrace('session.principal_mismatch', {
+        sessionId: ds.session.sessionId,
+        botId: larkAppId,
+        connectorId: req.source.connectorId,
+        ownerId: ds.session.credentialPrincipal.ownerId,
+        openId: credentialOwner.openId,
+        source: 'webhook',
+        result: 'rejected',
+        reason: 'open_id_mismatch',
+      }));
+      return {
+        ok: false,
+        triggerId,
+        errorCode: 'credential_owner_mismatch',
+        error: 'webhook owner does not match the existing session credential owner',
+      };
+    }
+    if (!ds) {
+      newSessionCredentialState = freezeCredentialIsolation(bot.config.credentialIsolation, credentialOwner);
+      logger.info(formatCredentialTrace('session.policy_frozen', {
+        botId: larkAppId,
+        connectorId: req.source.connectorId,
+        ownerId: newSessionCredentialState.credentialPrincipal?.ownerId,
+        openId: newSessionCredentialState.credentialPrincipal?.openId,
+        source: 'webhook',
+        result: 'frozen',
+        count: newSessionCredentialState.credentialIsolation?.mounts.length,
+        sandbox: newSessionCredentialState.sandbox,
+      }));
+    } else {
+      logger.info(formatCredentialTrace('session.principal_verified', {
+        sessionId: ds.session.sessionId,
+        botId: larkAppId,
+        connectorId: req.source.connectorId,
+        ownerId: ds.session.credentialPrincipal?.ownerId,
+        openId: credentialOwner.openId,
+        source: 'webhook',
+        result: 'accepted',
+      }));
+    }
+  }
+
   if (dryRun) {
     return {
       ok: true,
@@ -629,7 +782,6 @@ export async function triggerSessionTurn(
     return { ok: false, errorCode: 'trigger_failed', error: wd.error };
   }
 
-  const bot = getBot(larkAppId);
   const chatMode: ChatMode = httpVirtual
     ? 'group'
     : await getChatMode(larkAppId, chatId, { forceRefresh: true });
@@ -650,9 +802,21 @@ export async function triggerSessionTurn(
     await deliverOwnerNotification(ownerNotification, larkAppId, chatId, scope, anchor);
   }
 
-  const session = sessionStore.createSession(chatId, anchor, triggerTitle(req), 'group');
+  // Keep the disabled path byte-for-byte compatible with the legacy call;
+  // only credential-isolated sessions need the atomic creation snapshot.
+  const session = newSessionCredentialState.credentialPrincipal
+    ? sessionStore.createSession(
+        chatId,
+        anchor,
+        triggerTitle(req),
+        'group',
+        scope,
+        { ...newSessionCredentialState, larkAppId },
+      )
+    : sessionStore.createSession(chatId, anchor, triggerTitle(req), 'group');
   const now = Date.now();
   session.larkAppId = larkAppId;
+  session.ownerOpenId = newSessionCredentialState.credentialPrincipal?.openId;
   session.scope = scope;
   if (shouldOpenOwnTopic && topicMessage === null && !ownerNotification) session.externalTriggerTopicless = true;
   session.lastMessageAt = new Date(now).toISOString();

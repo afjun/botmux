@@ -326,6 +326,18 @@ describe('repo select card — plain switch', () => {
     expect(ds.session.initialUserTurnPending).toBeUndefined();
   });
 
+  it('blocks repo selection when the card operator is not the credential principal', async () => {
+    const ds = makeDs({ pendingRepo: true, pendingPrompt: 'secret task', worker: null });
+    ds.session.credentialPrincipal = { ownerId: 'alice', openId: 'ou_alice' };
+    ds.session.credentialIsolation = { version: 1, mounts: [] };
+    const { deps } = makeDeps(ds);
+
+    await handleCardAction(makeSelectEvent('repo_switch', '/repos/alpha'), deps, APP_ID);
+
+    expect(ds.pendingRepo).toBe(true);
+    expect(forkWorker).not.toHaveBeenCalled();
+  });
+
   // ─── empty start (no buffered user input at all) ─────────────────────────
   //
   // Reached when the session was created by a bare `/repo` (the message IS the

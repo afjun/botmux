@@ -11,6 +11,7 @@ import {
   type CliRuntimeConfig,
 } from './adapters/cli/runtime.js';
 import { logger } from './utils/logger.js';
+import { formatCredentialTrace } from './core/credential-isolation-log.js';
 import { isLocale, setBotLookup, type Locale } from './i18n/index.js';
 import type { VoiceConfig } from './services/voice/types.js';
 import { type Brand, sdkDomain, normalizeBrand } from './im/lark/lark-hosts.js';
@@ -25,6 +26,10 @@ import {
   normalizeSessionOwnerReminderConfig,
   type SessionOwnerReminderConfig,
 } from './core/session-owner-reminder.js';
+import {
+  normalizeCredentialIsolationConfig,
+  type CredentialIsolationConfig,
+} from './core/credential-isolation-config.js';
 import type {
   VcMeetingConsumerAgentConfig,
   VcMeetingConsumerConfig,
@@ -47,6 +52,14 @@ export class LarkTransportDisabledError extends Error {
   }
 }
 
+export type {
+  CredentialBootstrapConfig,
+  CredentialCommandConfig,
+  CredentialIsolationConfig,
+  CredentialIsolationPresetId,
+  CredentialMountConfig,
+  CredentialMountKind,
+} from './core/credential-isolation-config.js';
 export type {
   VcMeetingConsumerAgentConfig,
   VcMeetingConsumerConfig,
@@ -1144,6 +1157,10 @@ export interface BotConfig {
    * rely only on already-mounted local inputs.
    */
   sandboxNetwork?: boolean;
+  /** Per-owner credential isolation (requires sandbox: true).
+   *  Maps shared host paths to per-owner subdirectories under
+   *  ~/.botmux/owners/<ownerId>/. */
+  credentialIsolation?: CredentialIsolationConfig;
   /**
    * LEGACY read-isolation flag (pre fs-policy). The unified sandbox is
    * deny-by-default, so cross-bot read isolation is inherent — this flag is
@@ -2512,6 +2529,18 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
     const contentTriggers = normalizeContentTriggers(entry.contentTriggers, i);
     const messageListeners = normalizeMessageListeners(entry.messageListeners, i);
     const vcMeetingAgent = normalizeVcMeetingAgentConfig(entry.vcMeetingAgent);
+    const credentialIsolation = normalizeCredentialIsolationConfig(entry.credentialIsolation, {
+      workingDirs,
+      configPath: `Bot config [${i}].credentialIsolation`,
+    });
+    if (credentialIsolation) {
+      logger.info(formatCredentialTrace('config.loaded', {
+        botId: entry.larkAppId,
+        result: credentialIsolation.enabled ? 'enabled' : 'disabled',
+        count: credentialIsolation.mounts.length,
+        sandbox: credentialIsolation.enabled || entry.sandbox === true,
+      }));
+    }
 
     // voice：per-bot 语音引擎覆盖。结构化保留（engine ∈ sami|openai，sami/openai
     // 为对象，speaker/rate 透传）；非对象或 engine 非法 → undefined。深度校验
@@ -2573,6 +2602,7 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       sandboxHidePaths: normalizeStringList(entry.sandboxHidePaths),
       sandboxReadonlyPaths: normalizeStringList(entry.sandboxReadonlyPaths),
       sandboxNetwork: typeof entry.sandboxNetwork === 'boolean' ? entry.sandboxNetwork : undefined,
+      credentialIsolation,
       readIsolation: entry.readIsolation === true,
       readDenyExtraPaths: normalizeStringList(entry.readDenyExtraPaths),
       backendType: entry.backendType,

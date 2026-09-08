@@ -153,7 +153,7 @@ describe('createTask — id provided, task exists with identical canonical input
   });
 
   it('treats chatType as canonical because it changes future session semantics', async () => {
-    const { createTask, IdempotencyConflictError } = await freshImport();
+    const { createTask, canonicalScheduleInput, IdempotencyConflictError } = await freshImport();
     const id = 'wf_chattype';
     createTask({ ...BASE_PARAMS, id, chatType: 'group' });
     expect(() => createTask({ ...BASE_PARAMS, id })).toThrow(IdempotencyConflictError);
@@ -168,6 +168,27 @@ describe('createTask — id provided, task exists with DIFFERENT canonical input
     expect(() => createTask({ ...BASE_PARAMS, id, prompt: 'CHANGED' })).toThrow(
       IdempotencyConflictError,
     );
+  });
+
+  it('treats the frozen credential owner and policy as canonical input', async () => {
+    const { createTask, canonicalScheduleInput, IdempotencyConflictError } = await freshImport();
+    const id = 'wf_owner_policy';
+    const ownerPolicy = {
+      credentialPrincipal: { ownerId: 'alice', openId: 'ou_alice' },
+      credentialIsolation: { version: 1 as const, mounts: [] },
+      sandbox: true,
+    };
+
+    const created = createTask({ ...BASE_PARAMS, id, ...ownerPolicy });
+    expect(canonicalScheduleInput(created)).toEqual(canonicalScheduleInput({ ...BASE_PARAMS, id, ...ownerPolicy }));
+    expect(() => createTask({
+      ...BASE_PARAMS,
+      id,
+      ...ownerPolicy,
+      credentialPrincipal: { ownerId: 'bob', openId: 'ou_bob' },
+    })).toThrow(IdempotencyConflictError);
+    expect(createTask({ ...BASE_PARAMS, id, ...ownerPolicy }).credentialPrincipal)
+      .toEqual(ownerPolicy.credentialPrincipal);
   });
 
   it.each([

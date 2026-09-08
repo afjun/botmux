@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   resolveQuoteTarget,
+  resolveMentionBackRecipient,
   validateMentionDecision,
   shouldBlockMentionBackByParticipants,
   parseAttentionFlag,
@@ -12,6 +13,20 @@ import {
   containsLarkAtTag,
   neutralizeLarkAtTags,
 } from '../src/services/send-policy.js';
+
+describe('resolveMentionBackRecipient', () => {
+  it('pins owner-isolated sessions to the credential owner', () => {
+    expect(resolveMentionBackRecipient(true, 'ou_owner', 'ou_last_sender')).toBe('ou_owner');
+  });
+
+  it('keeps the triggering sender behavior for ordinary sessions', () => {
+    expect(resolveMentionBackRecipient(false, 'ou_stale_owner', 'ou_last_sender')).toBe('ou_last_sender');
+  });
+
+  it('falls back to the triggering sender for an incomplete isolation snapshot', () => {
+    expect(resolveMentionBackRecipient(true, undefined, 'ou_last_sender')).toBe('ou_last_sender');
+  });
+});
 
 describe('resolveQuoteTarget', () => {
   const base = { isChatScope: true, sendTopLevel: false, noQuote: false };

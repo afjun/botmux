@@ -24,12 +24,17 @@ describe('cmdSend hook context wiring', () => {
     expect(cliSource).toMatch(/replyMessage\(\s*appId,\s*sendTarget\.rootMessageId,\s*content,\s*msgType,\s*sendTarget\.mode === 'thread',\s*uuid,\s*hookContext,/);
   });
 
-  it('resolves mention-back from the explicit VC turn instead of the latest queued sender', () => {
+  it('pins mention-back to a credential owner and otherwise uses the explicit VC turn sender', () => {
     expect(cliSource).toContain(
       'const replyTargetSenderOpenId = explicitVcMeetingImOrigin?.replyTargetSenderOpenId',
     );
-    expect(cliSource).toContain('hasQuoteTargetSender: !!replyTargetSenderOpenId');
-    expect(cliSource).toMatch(/mentions\.push\(\{ open_id: replyTargetSenderOpenId, name: '' \}\)/);
+    expect(cliSource).toMatch(
+      /const credentialOwnerOpenId = s\.credentialIsolation\s*\? s\.credentialPrincipal\?\.openId\s*: undefined;/,
+    );
+    expect(cliSource).toContain('resolveMentionBackRecipient(');
+    expect(cliSource).toContain('hasQuoteTargetSender: !!mentionBackOpenId');
+    expect(cliSource).toContain('if (mentionBack && !credentialOwnerOpenId');
+    expect(cliSource).toMatch(/mentions\.push\(\{ open_id: mentionBackOpenId, name: '' \}\)/);
   });
 
   it('freezes VC listener replay content and indexes only the successful primary output', () => {

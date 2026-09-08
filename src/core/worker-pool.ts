@@ -48,6 +48,7 @@ import { findUniqueClaudeSessionByCwd } from './session-discovery.js';
 import {
   buildMarkdownCard,
   buildContextualReplyCard,
+  buildReplyCardFooter,
   type CardUsageSnapshot,
   type LocalHomeLinkMode,
 } from '../im/lark/md-card.js';
@@ -67,6 +68,15 @@ import {
 import { isSuspendableBackendType, getSessionPersistentBackendType, persistentBackendTargetForSession, persistentSessionName, killPersistentBackendTarget, killPersistentSession, probePersistentBackendTarget, resolvePairedSpawnBackendType, resolvePersistentBackendTarget } from './persistent-backend.js';
 import { getBot, getAllBots, loadBotConfigs, resolveBrandLabel, getLoadedConfigPath, resolveUsageDisplay } from '../bot-registry.js';
 import { RestartCoordinator, type RestartObserver } from './restart-coordinator.js';
+import { formatCredentialTrace } from './credential-isolation-log.js';
+import { credentialBootstrapLeaseDirectory } from './owner.js';
+import {
+  activeCredentialBootstrapLeases,
+  credentialBootstrapLeaseProcessAlive,
+  currentCredentialBootstrapLease,
+  removeCredentialBootstrapLease,
+  signalCredentialBootstrapLeaseProcess,
+} from './credential-bootstrap-lease.js';
 import { runtimeBuildIdentity } from '../utils/runtime-build-id.js';
 
 /** A random id minted once per daemon process (this lifetime). Stamped onto
@@ -76,6 +86,63 @@ const DAEMON_BOOT_ID = randomUUID();
 const restartCoordinator = new RestartCoordinator();
 const lifecycleRetiringWorkers = new WeakMap<DaemonSession, Set<ChildProcess>>();
 const transferRetiringWorkers = new WeakSet<ChildProcess>();
+const credentialBootstrapAuthorities = new Map<string, {
+  leaseId: string;
+  sessionId: string;
+  sessionCreatedAt: string;
+}>();
+
+function credentialBootstrapLeaseDir(ds: DaemonSession): string | undefined {
+  const principal = ds.session.credentialPrincipal;
+  if (!principal) return undefined;
+  let botmuxHome = dirname(config.session.dataDir);
+  try { botmuxHome = realpathSync(botmuxHome); } catch { /* use configured path */ }
+  return credentialBootstrapLeaseDirectory(botmuxHome, principal.ownerId);
+}
+
+function credentialBootstrapLeaseMatches(ds: DaemonSession, leaseId: string, allowCompleted = false): boolean {
+  const principal = ds.session.credentialPrincipal;
+  const directory = credentialBootstrapLeaseDir(ds);
+  const current = directory ? currentCredentialBootstrapLease(directory) : undefined;
+  const expected = current ?? (allowCompleted && principal
+    ? credentialBootstrapAuthorities.get(principal.ownerId)
+    : undefined);
+  return !!expected && expected.leaseId === leaseId
+    && expected.sessionId === ds.session.sessionId
+    && expected.sessionCreatedAt === ds.session.createdAt;
+}
+
+function preemptOlderCredentialBootstrapLeases(ds: DaemonSession, leaseId: string): void {
+  const principal = ds.session.credentialPrincipal;
+  const directory = credentialBootstrapLeaseDir(ds);
+  if (!principal || !directory || !credentialBootstrapLeaseMatches(ds, leaseId)) return;
+  const current = currentCredentialBootstrapLease(directory)!;
+  credentialBootstrapAuthorities.set(principal.ownerId, current);
+  for (const older of activeCredentialBootstrapLeases(directory)) {
+    if (older.leaseId === leaseId) continue;
+    const signaled = signalCredentialBootstrapLeaseProcess(older, 'SIGTERM');
+    logger.info(formatCredentialTrace('bootstrap.lease_preempted', {
+      sessionId: older.sessionId,
+      botId: ds.larkAppId,
+      ownerId: principal.ownerId,
+      result: signaled ? 'sigterm_sent' : 'process_not_verified',
+      leaseId: older.leaseId,
+      pid: older.runnerPid,
+    }));
+    const finish = setTimeout(() => {
+      if (credentialBootstrapLeaseProcessAlive(older)) {
+        signalCredentialBootstrapLeaseProcess(older, 'SIGKILL');
+      }
+      const cleanup = setTimeout(() => {
+        if (!credentialBootstrapLeaseProcessAlive(older)) {
+          removeCredentialBootstrapLease(directory, older);
+        }
+      }, 100);
+      cleanup.unref();
+    }, 2_000);
+    finish.unref();
+  }
+}
 
 function trackLifecycleRetirement(ds: DaemonSession, worker: ChildProcess): void {
   let workers = lifecycleRetiringWorkers.get(ds);
@@ -3816,6 +3883,12 @@ export async function forkSession(
     childTitle,
     targetChatType,
     targetScope,
+    {
+      credentialPrincipal: ds.session.credentialPrincipal,
+      credentialIsolation: ds.session.credentialIsolation,
+      sandbox: ds.session.sandbox,
+      larkAppId: ds.larkAppId,
+    },
   );
   // Provenance + fork wiring. cliSessionId points at the SOURCE's CLI id: the
   // child's first spawn resumes it and forks forward (pendingForkSession), then
@@ -4299,6 +4372,7 @@ export function forkWorker(
       BOTMUX: '1',  // Marker so user scripts/skills can detect a botmux-spawned CLI
       SESSION_DATA_DIR: config.session.dataDir,
       BOTMUX_SESSION_ID: ds.session.sessionId,
+      BOTMUX_SESSION_CREATED_AT: ds.session.createdAt,
       LARK_APP_ID: botCfg.larkAppId,
       // Withhold the real secret from the worker's own CLI env for a no-transport
       // session (apiOnly bot or HTTP virtual chat). SEPARATE leak from the
@@ -4374,7 +4448,7 @@ export function forkWorker(
     initAttributionTurnId,
   );
   const runtimeIdentity = runtimeBuildIdentity();
-  const initMsg: DaemonToWorker = {
+  const initMsg: Extract<DaemonToWorker, { type: 'init' }> = {
     type: 'init',
     sessionId: ds.session.sessionId,
     chatId: ds.chatId,
@@ -4450,6 +4524,8 @@ export function forkWorker(
     forkSession: ds.session.pendingForkSession === true,
     cliSessionId: ds.session.cliSessionId,
     ownerOpenId: ds.ownerOpenId,
+    credentialPrincipal: ds.session.credentialPrincipal,
+    credentialIsolation: ds.session.credentialIsolation,
     webPort: ds.session.webPort,
     larkAppId: botCfg.larkAppId,
     // Freeze on the session transport capability: a no-transport session
@@ -5607,6 +5683,168 @@ function setupWorkerHandlers(
         break;
       }
 
+      case 'credential_bootstrap_lease_claimed': {
+        preemptOlderCredentialBootstrapLeases(ds, msg.leaseId);
+        break;
+      }
+
+      case 'credential_bootstrap_qr': {
+        if (managedAuxUiSuppressed(msg.turnId, msg.dispatchAttempt)) {
+          logger.info(formatCredentialTrace('bootstrap.qr_delivery_skipped', {
+            sessionId: ds.session.sessionId,
+            botId: ds.larkAppId,
+            ownerId: ds.session.credentialPrincipal?.ownerId,
+            result: 'skipped',
+            reason: 'managed_aux_ui_suppressed',
+          }));
+          break;
+        }
+        const principal = ds.session.credentialPrincipal;
+        if (!principal || !credentialBootstrapLeaseMatches(ds, msg.leaseId)) {
+          logger.info(formatCredentialTrace('bootstrap.qr_delivery_skipped', {
+            sessionId: ds.session.sessionId,
+            botId: ds.larkAppId,
+            ownerId: principal?.ownerId,
+            result: 'skipped',
+            reason: 'stale_lease',
+            leaseId: msg.leaseId,
+          }));
+          break;
+        }
+        const ownerOpenId = /^ou_[A-Za-z0-9_-]+$/.test(principal.openId) ? principal.openId : undefined;
+        if (!ownerOpenId) {
+          logger.warn(formatCredentialTrace('bootstrap.qr_delivery_skipped', {
+            sessionId: ds.session.sessionId,
+            botId: ds.larkAppId,
+            ownerId: principal.ownerId,
+            result: 'skipped',
+            reason: 'owner_open_id_invalid',
+          }));
+          break;
+        }
+        try {
+          const locale = localeForBot(ds.larkAppId);
+          const footer = buildReplyCardFooter({
+            brand: renderBrandTemplate(resolveBrandLabel(ds.larkAppId), ds.workingDir),
+            recipientOpenIds: [ownerOpenId],
+            locale,
+          });
+          const cardJson = JSON.stringify({
+            schema: '2.0',
+            config: { update_multi: true, wide_screen_mode: true },
+            body: { direction: 'vertical', elements: [
+              {
+                tag: 'markdown',
+                content: `请扫码登录 ${msg.toolName}`,
+              },
+              {
+                tag: 'column_set',
+                flex_mode: 'none',
+                horizontal_spacing: 'small',
+                columns: [
+                  {
+                    tag: 'column', width: 'weighted', weight: 2, vertical_align: 'center',
+                    elements: [{
+                      tag: 'interactive_container',
+                      width: 'fill',
+                      padding: '4px',
+                      background_style: 'default',
+                      has_border: true,
+                      border_color: 'grey-300',
+                      corner_radius: '8px',
+                      elements: [{
+                        tag: 'img',
+                        img_key: msg.imageKey,
+                        alt: { tag: 'plain_text', content: `${msg.toolName} 登录二维码` },
+                        mode: 'fit_horizontal',
+                        preview: true,
+                      }],
+                    }],
+                  },
+                  {
+                    tag: 'column', width: 'weighted', weight: 6, vertical_align: 'center',
+                    elements: [{ tag: 'markdown', content: ' ' }],
+                  },
+                ],
+              },
+              {
+                tag: 'column_set',
+                flex_mode: 'none',
+                columns: [{
+                  tag: 'column', width: 'weighted', weight: 1,
+                  elements: [{
+                    tag: 'button',
+                    text: { tag: 'plain_text', content: '打开登录链接' },
+                    type: 'primary',
+                    behaviors: [{
+                      type: 'open_url',
+                      default_url: msg.loginUrl,
+                      pc_url: msg.loginUrl,
+                      android_url: msg.loginUrl,
+                      ios_url: msg.loginUrl,
+                    }],
+                  }],
+                }],
+              },
+              ...(footer ? [
+                { tag: 'hr' },
+                footer.element,
+              ] : []),
+            ] },
+          });
+          await scopedReply(cardJson, 'interactive', msg.turnId);
+          logger.info(formatCredentialTrace('bootstrap.qr_delivered', {
+            sessionId: ds.session.sessionId,
+            botId: ds.larkAppId,
+            ownerId: ds.session.credentialPrincipal?.ownerId,
+            result: 'delivered',
+          }));
+        } catch (err: any) {
+          logger.error(formatCredentialTrace('bootstrap.qr_delivery_failed', {
+            sessionId: ds.session.sessionId,
+            botId: ds.larkAppId,
+            ownerId: ds.session.credentialPrincipal?.ownerId,
+            result: 'error',
+            reason: err.message,
+          }));
+          logger.error(`[${t}] Failed to deliver credential bootstrap QR to Lark: ${err.message}`);
+        }
+        break;
+      }
+
+      case 'credential_bootstrap_succeeded': {
+        if (managedAuxUiSuppressed(msg.turnId, msg.dispatchAttempt)) break;
+        if (!credentialBootstrapLeaseMatches(ds, msg.leaseId, true)) {
+          logger.info(formatCredentialTrace('bootstrap.success_delivery_skipped', {
+            sessionId: ds.session.sessionId,
+            botId: ds.larkAppId,
+            ownerId: ds.session.credentialPrincipal?.ownerId,
+            result: 'skipped',
+            reason: 'stale_lease',
+            leaseId: msg.leaseId,
+          }));
+          break;
+        }
+        try {
+          await scopedReply(msg.message, 'text', msg.turnId);
+          logger.info(formatCredentialTrace('bootstrap.success_delivered', {
+            sessionId: ds.session.sessionId,
+            botId: ds.larkAppId,
+            ownerId: ds.session.credentialPrincipal?.ownerId,
+            result: 'delivered',
+          }));
+        } catch (err: any) {
+          logger.error(formatCredentialTrace('bootstrap.success_delivery_failed', {
+            sessionId: ds.session.sessionId,
+            botId: ds.larkAppId,
+            ownerId: ds.session.credentialPrincipal?.ownerId,
+            result: 'error',
+            reason: err.message,
+          }));
+        }
+        break;
+      }
+
       case 'tui_prompt': {
         // AI detected an interactive TUI prompt — post card to thread
         if (!ownsLifecycleMutation()) {
@@ -5986,6 +6224,57 @@ function setupWorkerHandlers(
             try {
               await scopedReply(tr('worker.adopted_session_exited', undefined, loc), 'text', undefined);
             } catch { /* best effort */ }
+          }
+          break;
+        }
+
+        // Exit 79 means a newer Session for the same owner took over login.
+        // The old topic stays quiet and requires an explicit /restart.
+        if (msg.credentialBootstrapResult === 'superseded' && ds.session.credentialIsolation) {
+          logger.info(formatCredentialTrace('bootstrap.worker_exit', {
+            sessionId: ds.session.sessionId,
+            botId: ds.larkAppId,
+            ownerId: ds.session.credentialPrincipal?.ownerId,
+            backend: ds.session.backendType,
+            result: 'superseded',
+            reason: 'runner_exit_79',
+          }));
+          restartCounts.delete(ds.session.sessionId);
+          killWorker(ds);
+          ds.lastScreenStatus = 'idle';
+          clearUsageRefreshTimer(ds);
+          break;
+        }
+
+        // Exit 78 is reserved by credential-bootstrap-runner for an
+        // incomplete/failed login. An automatic restart would repeatedly
+        // launch an interactive auth flow and can spam links/device codes.
+        // Preserve the session, but require an explicit /restart retry.
+        if (msg.credentialBootstrapResult === 'failed' && ds.session.credentialIsolation) {
+          logger.warn(formatCredentialTrace('bootstrap.worker_exit', {
+            sessionId: ds.session.sessionId,
+            botId: ds.larkAppId,
+            ownerId: ds.session.credentialPrincipal?.ownerId,
+            openId: ds.session.credentialPrincipal?.openId,
+            backend: ds.session.backendType,
+            result: 'failed',
+            reason: 'runner_exit_78',
+          }));
+          logger.warn(`[${t}] Credential bootstrap failed; waiting for explicit /restart`);
+          restartCounts.delete(ds.session.sessionId);
+          killWorker(ds);
+          ds.lastScreenStatus = 'idle';
+          clearUsageRefreshTimer(ds);
+          if (!suppressExitUi) {
+            try {
+              await scopedReply(
+                '🔐 登录未完成或校验失败，业务命令尚未执行。请完成话题中显示的登录步骤后发送 /restart 重试。',
+                'text',
+                msg.turnId,
+              );
+            } catch (replyErr) {
+              logger.error(`[${t}] Failed to deliver credential bootstrap failure: ${replyErr}`);
+            }
           }
           break;
         }
@@ -7054,11 +7343,12 @@ function reserveWorkerGeneration(ds: DaemonSession): number {
  * a fresh CLI, which the sandbox wraps normally.
  */
 export function adoptSandboxBlocked(
-  botCfg: { sandbox?: boolean; readIsolation?: boolean; apiOnly?: boolean },
+  botCfg: { sandbox?: boolean; readIsolation?: boolean; apiOnly?: boolean; credentialIsolation?: { enabled?: boolean } },
   session?: { sandbox?: boolean; chatId?: string },
 ): boolean {
   return botCfg.sandbox === true
     || botCfg.readIsolation === true
+    || botCfg.credentialIsolation?.enabled === true
     // A core-only (apiOnly) bot — or a session on a synthetic HTTP virtual chat —
     // must NOT adopt-observe a pre-existing external CLI: that CLI runs fully
     // unisolated (the adopt observe branch returns before any fs-policy build),
