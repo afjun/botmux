@@ -2,15 +2,35 @@ import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, describe, expect, it } from 'vitest';
 import type { DaemonToWorker, WorkerToDaemon } from '../src/types.js';
 
 const children = new Set<ChildProcess>();
 const tempDirs = new Set<string>();
 const tmuxSessions = new Set<string>();
+// Keep this integration test away from a pre-existing user tmux server whose
+// global PATH may not contain the Node runtime used by the fake pane command.
+const tmuxTmpDir = mkdtempSync(join(tmpdir(), 'botmux-worker-tmux-'));
+const previousTmuxTmpDir = process.env.TMUX_TMPDIR;
+process.env.TMUX_TMPDIR = tmuxTmpDir;
 const tmuxAvailable = (() => {
-  try { execFileSync('tmux', ['-V'], { stdio: 'ignore' }); return true; } catch { return false; }
+  const probeSession = `botmux-probe-${process.pid}-${Date.now()}`;
+  try {
+    execFileSync('tmux', ['-V'], { stdio: 'ignore' });
+    execFileSync('tmux', ['new-session', '-d', '-s', probeSession, 'true'], { stdio: 'ignore' });
+    execFileSync('tmux', ['kill-session', '-t', probeSession], { stdio: 'ignore' });
+    return true;
+  } catch {
+    try { execFileSync('tmux', ['kill-session', '-t', probeSession], { stdio: 'ignore' }); } catch { /* probe failed */ }
+    return false;
+  }
 })();
+
+afterAll(() => {
+  if (previousTmuxTmpDir === undefined) delete process.env.TMUX_TMPDIR;
+  else process.env.TMUX_TMPDIR = previousTmuxTmpDir;
+  rmSync(tmuxTmpDir, { recursive: true, force: true });
+});
 
 async function stopChild(child: ChildProcess): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return;
@@ -133,6 +153,10 @@ setInterval(() => {}, 1_000);
     const tmuxSession = `botmux-adopt-pi-${process.pid}-${Date.now()}`;
     tmuxSessions.add(tmuxSession);
     execFileSync('tmux', ['new-session', '-d', '-s', tmuxSession, fakePi]);
+    const adoptPaneTarget = execFileSync(
+      'tmux', ['display-message', '-p', '-t', tmuxSession, '#{pane_id}'],
+      { encoding: 'utf8' },
+    ).trim();
 
     const messages: WorkerToDaemon[] = [];
     const logs: string[] = [];
@@ -166,7 +190,7 @@ setInterval(() => {}, 1_000);
       larkAppSecret: 'secret',
       turnId: 'om_turn',
       adoptMode: true,
-      adoptTmuxTarget: `${tmuxSession}:0.0`,
+      adoptTmuxTarget: adoptPaneTarget,
       adoptPaneCols: 160,
       adoptPaneRows: 50,
     } satisfies DaemonToWorker);

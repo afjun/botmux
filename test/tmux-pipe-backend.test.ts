@@ -82,13 +82,11 @@ describe('TmuxPipeBackend.spawn', () => {
     expect(mockedSpawnSync).toHaveBeenCalledWith('mkfifo', expect.arrayContaining([expect.stringMatching(/botmux-pipe-/)]), expect.any(Object));
 
     // Step 2: tmux pipe-pane -O -t 0:2.0 'cat > <fifo>'
-    const pipeCalls = mockedExecSync.mock.calls
-      .map(c => String(c[0]))
-      .filter(c => c.includes('pipe-pane'));
-    expect(pipeCalls.length).toBe(1);
-    expect(pipeCalls[0]).toContain('-O');
-    expect(pipeCalls[0]).toContain("'0:2.0'");
-    expect(pipeCalls[0]).toMatch(/cat > '.*botmux-pipe-.*\.fifo'/);
+    const pipeCall = getExecFileCalls().find(c => (c[1] as string[]).includes('pipe-pane'));
+    expect(pipeCall).toBeDefined();
+    const args = pipeCall![1] as string[];
+    expect(args).toEqual(expect.arrayContaining(['pipe-pane', '-O', '-t', '0:2.0']));
+    expect(args.at(-1)).toMatch(/^cat > '.*botmux-pipe-.*\.fifo'$/);
   });
 });
 

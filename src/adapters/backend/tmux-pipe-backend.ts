@@ -236,8 +236,9 @@ export class TmuxPipeBackend implements SessionBackend {
     // -O causes tmux to overwrite any prior pipe-pane subscription.
     // The shell command must redirect to the fifo; tmux runs it via /bin/sh.
     try {
-      execSync(
-        `tmux pipe-pane -O -t ${shellescape(this.paneTarget)} 'cat > ${shellescape(this.fifoPath)}'`,
+      execFileSync(
+        'tmux',
+        ['pipe-pane', '-O', '-t', this.paneTarget, `cat > ${shellescape(this.fifoPath)}`],
         { stdio: 'ignore', timeout: 5000, env: tmuxEnv() },
       );
       this.pipeAttached = true;

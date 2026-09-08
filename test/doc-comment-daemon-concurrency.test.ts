@@ -395,7 +395,7 @@ describe('document-comment routing integration', () => {
     const fullRegion = asyncFnRegion('autoCreateDocSession', 'handleDocComment');
     const region = fullRegion.slice(0, fullRegion.indexOf('const handledDocCommentTurns'));
     expect(region).not.toContain('activeSessions.set(');
-    expect(region).not.toContain('resolveSender(');
+    expect(region).toContain('resolveSender(larkAppId, ctx.authorOpenId, \'user\')');
     expect(region).not.toContain('docCommentTurns');
     expect(region).not.toContain('docCommentTargets');
     expect(region).toContain('const virtualAnchor = virtualChatId;');

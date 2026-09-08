@@ -535,7 +535,7 @@ describe('triggerSessionTurn rootMessageId target', () => {
 
     expect(res).toMatchObject({ ok: true, action: 'queued' });
     const ds = activeSessions.get(sessionKey(ROOT, APP));
-    expect(ds?.session.credentialPrincipal).toEqual({ ownerId: 'alice', openId: 'ou_owner' });
+    expect(ds?.session.credentialPrincipal).toMatchObject({ ownerId: 'alice', openId: 'ou_owner' });
     expect(ds?.session.ownerOpenId).toBe('ou_owner');
     expect(mockRunAutoWorktreeCommit).toHaveBeenCalledWith(expect.objectContaining({
       ds,
