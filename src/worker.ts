@@ -263,6 +263,7 @@ import {
   localSandboxApplies,
   type CredentialJwtBridgeSpec,
 } from './adapters/backend/sandbox.js';
+import { v3SessionWorkflowStagingDir } from './workflows/v3/session-relay.js';
 import {
   DEVICE_AUTHORITY_DIRECTORY,
   DEVICE_CREDENTIAL_FILE,
@@ -9345,12 +9346,14 @@ async function spawnCli(
     const outbox = process.platform === 'linux'
       ? join(canonical(dataDir), 'sandboxes', cfg.sessionId, 'outbox')
       : undefined;
+    const workflowStaging = v3SessionWorkflowStagingDir(canonical(dataDir), cfg.sessionId);
     // Pre-create the outbox BEFORE buildFsPolicy so it survives the allow-rule
     // existence-filter below (a not-yet-existing readWrite path is dropped, and
     // bwrap can't bind a missing source → the sandboxed `botmux send` relay
     // would EPERM/ENOENT writing its <hash>.content into an unbound dir).
     // prepareDirectSandbox re-mkdirs it too; recursive make is idempotent.
     if (outbox) { try { mkdirSync(outbox, { recursive: true }); } catch { /* best-effort; prepareDirectSandbox retries */ } }
+    mkdirSync(workflowStaging, { recursive: true });
 
     // The botmux install/checkout root (dir containing dist/ + node_modules).
     // This module compiles to <checkout>/dist/worker.js, so `../../` from here is
@@ -9771,7 +9774,7 @@ async function spawnCli(
       ]),
       botmuxInstallRoot,
       outbox,
-      extraWritePaths: keepExisting([process.env.TMPDIR]),
+      extraWritePaths: keepExisting([process.env.TMPDIR, workflowStaging]),
       userPaths,
       mandatoryDenyPaths,
       mandatoryDenyRegexes,

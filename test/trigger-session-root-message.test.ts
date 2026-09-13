@@ -185,7 +185,11 @@ describe('triggerSessionTurn rootMessageId target', () => {
     const ds = activeSessions.get(sessionKey(ROOT, APP));
     expect(ds?.scope).toBe('thread');
     expect(ds?.session.rootMessageId).toBe(ROOT);
-    expect(mockForkWorker).toHaveBeenCalledWith(ds, { content: expect.stringContaining('new:') });
+    expect(mockForkWorker).toHaveBeenCalledWith(
+      ds,
+      { content: expect.stringContaining('new:') },
+      expect.stringMatching(/^trg_/),
+    );
   });
 
   it('keeps the localized topic seed by default', () => {
@@ -291,7 +295,11 @@ describe('triggerSessionTurn rootMessageId target', () => {
     const ds = activeSessions.get(sessionKey(CHAT, APP));
     expect(ds?.scope).toBe('chat');
     expect(ds?.session.externalTriggerTopicless).toBe(true);
-    expect(mockForkWorker).toHaveBeenCalledWith(ds, { content: expect.stringContaining('new:') });
+    expect(mockForkWorker).toHaveBeenCalledWith(
+      ds,
+      expect.objectContaining({ content: expect.stringContaining('new:') }),
+      expect.stringMatching(/^trg_/),
+    );
   });
 
   it('rejects cross-chat rootMessageId without creating a session', async () => {
@@ -323,7 +331,11 @@ describe('triggerSessionTurn rootMessageId target', () => {
     expect(res).toMatchObject({ ok: true, action: 'delivered', target: { sessionId: 'sess_existing', chatId: CHAT } });
     expect(mockCreateSession).not.toHaveBeenCalled();
     expect(mockForkWorker).not.toHaveBeenCalled();
-    expect(send).toHaveBeenCalledWith({ type: 'message', content: expect.stringContaining('follow:') });
+    expect(send).toHaveBeenCalledWith({
+      type: 'message',
+      content: expect.stringContaining('follow:'),
+      turnId: res.triggerId,
+    });
   });
 
   it('fold-in to a live session does NOT overwrite its frozen model/effort', async () => {
@@ -360,6 +372,7 @@ describe('triggerSessionTurn rootMessageId target', () => {
     );
 
     expect(res).toMatchObject({ ok: true, triggerId: 'vcd_stable_delivery_key', action: 'delivered' });
+    expect(ds.session.quoteTargetId).toBe('vcd_stable_delivery_key');
     expect(beforeDispatch).toHaveBeenCalledWith({ sessionId: ds.session.sessionId, workerGeneration: 7 });
     expect(beforeDispatch.mock.invocationCallOrder[0]).toBeLessThan(send.mock.invocationCallOrder[0]!);
     expect(ds.suppressedFinalOutputTurns?.has('vcd_stable_delivery_key')).toBe(true);
@@ -537,6 +550,9 @@ describe('triggerSessionTurn rootMessageId target', () => {
     const ds = activeSessions.get(sessionKey(ROOT, APP));
     expect(ds?.session.credentialPrincipal).toMatchObject({ ownerId: 'alice', openId: 'ou_owner' });
     expect(ds?.session.ownerOpenId).toBe('ou_owner');
+    expect(ds?.session.lastCallerOpenId).toBe('ou_owner');
+    expect(ds?.session.quoteTargetId).toBe(res.triggerId);
+    expect(ds?.pendingTurnId).toBe(res.triggerId);
     expect(mockRunAutoWorktreeCommit).toHaveBeenCalledWith(expect.objectContaining({
       ds,
       operatorOpenId: 'ou_owner',
@@ -566,6 +582,7 @@ describe('triggerSessionTurn rootMessageId target', () => {
     expect(mockForkWorker).toHaveBeenCalledWith(
       activeSessions.get(sessionKey(ROOT, APP)),
       expect.objectContaining({ codexAppInput: { text: '外部事件触发' } }),
+      expect.stringMatching(/^trg_/),
     );
   });
 
@@ -778,15 +795,18 @@ describe('triggerSessionTurn suppressFinalOutput (loud connector opt-in)', () =>
     );
   });
 
-  it('does not arm suppression and forks loud when the connector opt-in is absent', async () => {
+  it('attributes the turn without arming suppression when the connector opt-in is absent', async () => {
     const activeSessions = new Map<string, DaemonSession>();
 
-    await triggerSessionTurn(request(), { larkAppId: APP, activeSessions });
+    const res = await triggerSessionTurn(request(), { larkAppId: APP, activeSessions });
 
     const ds = activeSessions.get(sessionKey(ROOT, APP))!;
     expect(ds.suppressedTriggerFinalTurns).toBeUndefined();
-    // Loud fork keeps the legacy 2-arg shape (no turnId stamped).
-    expect(mockForkWorker).toHaveBeenCalledWith(ds, { content: expect.stringContaining('new:') });
+    expect(mockForkWorker).toHaveBeenCalledWith(
+      ds,
+      { content: expect.stringContaining('new:') },
+      res.triggerId,
+    );
   });
 
   it('N1: waitForFinalOutput never arms suppression even when the option is set', async () => {

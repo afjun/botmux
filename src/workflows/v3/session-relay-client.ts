@@ -19,7 +19,13 @@ import {
 import { findAncestorSessionContext } from '../../core/session-marker.js';
 import type { WorkflowDaemonMutation, WorkflowDaemonMutationResponse } from './daemon-ipc-client.js';
 import { WorkflowDaemonMutationTransportError } from './daemon-ipc-client.js';
-import { V3_SESSION_RUN_MUTATION_ROUTE_PREFIX } from './session-relay.js';
+import type { RawParamInput } from '../shared/params.js';
+import {
+  V3_SESSION_SAVED_WORKFLOW_RUN_ROUTE,
+  V3_SESSION_RUN_CREATE_ROUTE,
+  V3_SESSION_RUN_MUTATION_ROUTE_PREFIX,
+  V3_SESSION_SPEC_FINALIZE_MUTATION,
+} from './session-relay.js';
 
 export interface WorkflowSessionRelayContext {
   sessionId: string;
@@ -87,6 +93,67 @@ export async function postWorkflowSessionRunMutation(input: {
   resolveIpcPort?: (larkAppId: string | undefined) => number | undefined;
   fetchImpl?: typeof fetch;
 }): Promise<WorkflowDaemonMutationResponse> {
+  return postWorkflowSessionRequest({
+    context: input.context,
+    path: `${V3_SESSION_RUN_MUTATION_ROUTE_PREFIX}/${encodeURIComponent(input.runId)}/${input.mutation}`,
+    ...(input.body ? { body: input.body } : {}),
+    ...(input.resolveIpcPort ? { resolveIpcPort: input.resolveIpcPort } : {}),
+    ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+  });
+}
+
+export async function postWorkflowSessionRunCreate(input: {
+  context: WorkflowSessionRelayContext;
+  goal: string;
+  resolveIpcPort?: (larkAppId: string | undefined) => number | undefined;
+  fetchImpl?: typeof fetch;
+}): Promise<WorkflowDaemonMutationResponse> {
+  return postWorkflowSessionRequest({
+    context: input.context,
+    path: V3_SESSION_RUN_CREATE_ROUTE,
+    body: { goal: input.goal },
+    ...(input.resolveIpcPort ? { resolveIpcPort: input.resolveIpcPort } : {}),
+    ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+  });
+}
+
+export async function postWorkflowSessionSavedWorkflowRun(input: {
+  context: WorkflowSessionRelayContext;
+  ref: string;
+  rawParams: Record<string, RawParamInput>;
+  resolveIpcPort?: (larkAppId: string | undefined) => number | undefined;
+  fetchImpl?: typeof fetch;
+}): Promise<WorkflowDaemonMutationResponse> {
+  return postWorkflowSessionRequest({
+    context: input.context,
+    path: V3_SESSION_SAVED_WORKFLOW_RUN_ROUTE,
+    body: { ref: input.ref, rawParams: input.rawParams },
+    ...(input.resolveIpcPort ? { resolveIpcPort: input.resolveIpcPort } : {}),
+    ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+  });
+}
+
+export async function postWorkflowSessionSpecFinalize(input: {
+  context: WorkflowSessionRelayContext;
+  runId: string;
+  resolveIpcPort?: (larkAppId: string | undefined) => number | undefined;
+  fetchImpl?: typeof fetch;
+}): Promise<WorkflowDaemonMutationResponse> {
+  return postWorkflowSessionRequest({
+    context: input.context,
+    path: `${V3_SESSION_RUN_MUTATION_ROUTE_PREFIX}/${encodeURIComponent(input.runId)}/${V3_SESSION_SPEC_FINALIZE_MUTATION}`,
+    ...(input.resolveIpcPort ? { resolveIpcPort: input.resolveIpcPort } : {}),
+    ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+  });
+}
+
+async function postWorkflowSessionRequest(input: {
+  context: WorkflowSessionRelayContext;
+  path: string;
+  body?: Record<string, unknown>;
+  resolveIpcPort?: (larkAppId: string | undefined) => number | undefined;
+  fetchImpl?: typeof fetch;
+}): Promise<WorkflowDaemonMutationResponse> {
   const discovered = input.resolveIpcPort?.(input.context.larkAppId);
   const ipcPort = discovered ?? input.context.ipcPortFallback;
   if (!ipcPort) {
@@ -94,7 +161,6 @@ export async function postWorkflowSessionRunMutation(input: {
       '找不到目标 daemon 端口（daemon 发现目录不可见且缺少 BOTMUX_DAEMON_IPC_PORT）；请确认 daemon 在线',
     );
   }
-  const path = `${V3_SESSION_RUN_MUTATION_ROUTE_PREFIX}/${encodeURIComponent(input.runId)}/${input.mutation}`;
   const requestBody = JSON.stringify({
     ...(input.body ?? {}),
     sessionId: input.context.sessionId,
@@ -107,7 +173,7 @@ export async function postWorkflowSessionRunMutation(input: {
   const fetchImpl = input.fetchImpl ?? fetch;
   let response: Response;
   try {
-    response = await fetchImpl(`http://127.0.0.1:${ipcPort}${path}`, {
+    response = await fetchImpl(`http://127.0.0.1:${ipcPort}${input.path}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: requestBody,

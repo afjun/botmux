@@ -75,6 +75,7 @@ export function readStableArtifactFile(
   path: string,
   label: string,
   parent: DirectoryBinding,
+  maxBytes?: number,
 ): FileSnapshot {
   const lexicalPath = resolve(path);
   const beforeName = lstatSync(lexicalPath, { bigint: true });
@@ -92,6 +93,9 @@ export function readStableArtifactFile(
     const beforeRead = fstatSync(fd, { bigint: true });
     if (!beforeRead.isFile() || !sameInode(beforeName, beforeRead)) {
       throw new Error(`v3 final outputs: ${label} changed before read: ${lexicalPath}`);
+    }
+    if (maxBytes !== undefined && beforeRead.size > BigInt(maxBytes)) {
+      throw new Error(`v3 final outputs: ${label} exceeds ${maxBytes} bytes: ${lexicalPath}`);
     }
     const bytes = readFileSync(fd);
     const afterRead = fstatSync(fd, { bigint: true });

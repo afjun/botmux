@@ -287,11 +287,27 @@ import {
 import { botToSnapshot } from './workflows/v3/bot-resolve.js';
 import { isValidRunId as isValidV3RunId } from './workflows/v3/ops-projection.js';
 import {
+  authorizeV3SessionRunCreateRequest,
   authorizeV3SessionRunMutationRequest,
+  authorizeV3SessionSavedWorkflowRunRequest,
+  V3_SESSION_SAVED_WORKFLOW_RUN_ROUTE,
+  V3_SESSION_RUN_CREATE_ROUTE,
+  V3_SESSION_SPEC_FINALIZE_MUTATION,
   V3_SESSION_RUN_MUTATIONS,
   V3_SESSION_RUN_MUTATION_ROUTE_PREFIX,
+  v3SessionWorkflowSpecPath,
+  v3SessionWorkflowStagingDir,
 } from './workflows/v3/session-relay.js';
-import { defaultBaseDir as v3DefaultBaseDir } from './workflows/v3/grill-state.js';
+import {
+  birthRun as birthV3Run,
+  defaultBaseDir as v3DefaultBaseDir,
+  mintV3RunId,
+} from './workflows/v3/grill-state.js';
+import { hostSpecFinalize } from './workflows/v3/host.js';
+import {
+  bindArtifactDirectory,
+  readStableArtifactFile,
+} from './workflows/v3/portable-artifact-snapshot.js';
 import { persistV3StartIntent } from './workflows/v3/start-intent.js';
 import {
   createWorkflowDaemonIpcNonceStore,
@@ -305,7 +321,10 @@ import {
   parseWorkflowDaemonMutationBody,
 } from './workflows/v3/daemon-ipc-body.js';
 import type { WorkflowDaemonMutation } from './workflows/v3/daemon-ipc-client.js';
-import type { SavedWorkflowActorContext } from './workflows/v3/library-service.js';
+import {
+  instantiatePublishedSavedWorkflow,
+  type SavedWorkflowActorContext,
+} from './workflows/v3/library-service.js';
 import { resolveEffectivePluginIds } from './core/plugins/effective.js';
 import {
   buildCodexCompletionCard,
@@ -5065,6 +5084,250 @@ workflowDaemonMutationRoute('grant', async (reply, params, body, identity) => {
 // 活跃会话记录反推 (caller, chat, bot) 三元组——请求体选不了身份——再按与 CLI
 // 宿主路径完全相同的 run 绑定规则授权，最后调用同一个 mutation 执行器。
 // narrow-untrusted 白名单见 dashboard-ipc-server 的 routeHasNarrowUntrustedAuth。
+ipcRoute('POST', V3_SESSION_RUN_CREATE_ROUTE, async (req: IncomingMessage, res) => {
+  let raw: unknown;
+  try {
+    raw = await readJsonBody<unknown>(req);
+  } catch {
+    return jsonRes(res, 400, { ok: false, error: 'bad_json' });
+  }
+  const claimedSessionId = raw && typeof raw === 'object' && !Array.isArray(raw)
+    ? (raw as Record<string, unknown>).sessionId
+    : undefined;
+  const ds = typeof claimedSessionId === 'string'
+    ? findActiveBySessionId(claimedSessionId)
+    : undefined;
+  const replyTarget = ds ? (ds.currentReplyTarget ?? ds.session.currentReplyTarget) : undefined;
+  const decision = authorizeV3SessionRunCreateRequest({
+    raw,
+    trustedHost: isTrustedHostIpcRequest(req),
+    session: ds
+      ? {
+          receiver: !!ds.session.vcMeetingReceiver,
+          ...(ds.managedTurnOrigin ? { liveOrigin: ds.managedTurnOrigin } : {}),
+          ...(ds.session.lastCallerOpenId ? { callerOpenId: ds.session.lastCallerOpenId } : {}),
+          ...(ds.chatId ? { chatId: ds.chatId } : {}),
+          ...(ds.larkAppId ? { larkAppId: ds.larkAppId } : {}),
+          ...(ds.session.chatType === 'group' || ds.session.chatType === 'p2p'
+            ? { chatType: ds.session.chatType }
+            : {}),
+          ...(ds.session.scope === 'thread' && ds.session.rootMessageId
+            ? { rootMessageId: ds.session.rootMessageId }
+            : replyTarget?.rootMessageId
+              ? { rootMessageId: replyTarget.rootMessageId }
+              : {}),
+          ...(ds.session.quoteTargetId ? { quoteTargetId: ds.session.quoteTargetId } : {}),
+          ...(replyTarget?.turnId ? { currentReplyTargetTurnId: replyTarget.turnId } : {}),
+        }
+      : undefined,
+    selfLarkAppId: selfV3LarkAppId,
+  });
+  if (!decision.ok) {
+    return jsonRes(res, decision.status, {
+      ok: false,
+      error: decision.error,
+      ...(decision.detail ? { detail: decision.detail } : {}),
+    });
+  }
+  try {
+    const runId = mintV3RunId(decision.goal);
+    const stagedSpecPath = v3SessionWorkflowSpecPath(
+      config.session.dataDir,
+      decision.chatBinding.sessionId!,
+      runId,
+    );
+    mkdirSync(dirname(stagedSpecPath), { recursive: true, mode: 0o700 });
+    const { runDir, state } = birthV3Run({
+      goal: decision.goal,
+      baseDir: v3DefaultBaseDir(),
+      runId,
+      chatBinding: decision.chatBinding,
+    });
+    return jsonRes(res, 201, {
+      ok: true,
+      runId,
+      runDir,
+      status: state.status,
+      specPath: stagedSpecPath,
+      chatBound: true,
+    });
+  } catch (err) {
+    return jsonRes(res, 500, {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+});
+
+ipcRoute('POST', V3_SESSION_SAVED_WORKFLOW_RUN_ROUTE, async (req: IncomingMessage, res) => {
+  let raw: unknown;
+  try {
+    raw = await readJsonBody<unknown>(req);
+  } catch {
+    return jsonRes(res, 400, { ok: false, error: 'bad_json' });
+  }
+  const claimedSessionId = raw && typeof raw === 'object' && !Array.isArray(raw)
+    ? (raw as Record<string, unknown>).sessionId
+    : undefined;
+  const ds = typeof claimedSessionId === 'string'
+    ? findActiveBySessionId(claimedSessionId)
+    : undefined;
+  const replyTarget = ds ? (ds.currentReplyTarget ?? ds.session.currentReplyTarget) : undefined;
+  const decision = authorizeV3SessionSavedWorkflowRunRequest({
+    raw,
+    trustedHost: isTrustedHostIpcRequest(req),
+    session: ds
+      ? {
+          receiver: !!ds.session.vcMeetingReceiver,
+          ...(ds.managedTurnOrigin ? { liveOrigin: ds.managedTurnOrigin } : {}),
+          ...(ds.session.lastCallerOpenId ? { callerOpenId: ds.session.lastCallerOpenId } : {}),
+          ...(ds.chatId ? { chatId: ds.chatId } : {}),
+          ...(ds.larkAppId ? { larkAppId: ds.larkAppId } : {}),
+          ...(ds.session.chatType === 'group' || ds.session.chatType === 'p2p'
+            ? { chatType: ds.session.chatType }
+            : {}),
+          ...(ds.session.scope === 'thread' && ds.session.rootMessageId
+            ? { rootMessageId: ds.session.rootMessageId }
+            : replyTarget?.rootMessageId
+              ? { rootMessageId: replyTarget.rootMessageId }
+              : {}),
+          ...(ds.session.quoteTargetId ? { quoteTargetId: ds.session.quoteTargetId } : {}),
+          ...(replyTarget?.turnId ? { currentReplyTargetTurnId: replyTarget.turnId } : {}),
+        }
+      : undefined,
+    selfLarkAppId: selfV3LarkAppId,
+  });
+  if (!decision.ok) {
+    return jsonRes(res, decision.status, {
+      ok: false,
+      error: decision.error,
+      ...(decision.detail ? { detail: decision.detail } : {}),
+    });
+  }
+  try {
+    const materialized = await instantiatePublishedSavedWorkflow({
+      dataDir: dirname(v3DefaultBaseDir()),
+      ref: decision.ref,
+      context: decision.context,
+      rawParams: decision.rawParams,
+      bots: loadBotConfigs(),
+      baseDir: v3DefaultBaseDir(),
+    });
+    const executor = v3RunMutationExecutors.start;
+    if (!executor || !selfV3LarkAppId || !selfV3BootInstanceId) {
+      return jsonRes(res, 503, { ok: false, error: 'workflow_ipc_identity_unavailable' });
+    }
+    return executor(
+      (status, payload) => jsonRes(res, status, payload),
+      { runId: materialized.runId },
+      {},
+      { larkAppId: selfV3LarkAppId, bootInstanceId: selfV3BootInstanceId },
+    );
+  } catch (err) {
+    return jsonRes(res, 400, {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+});
+
+ipcRoute(
+  'POST',
+  `${V3_SESSION_RUN_MUTATION_ROUTE_PREFIX}/:runId/${V3_SESSION_SPEC_FINALIZE_MUTATION}`,
+  async (req: IncomingMessage, res, params) => {
+    let raw: unknown;
+    try {
+      raw = await readJsonBody<unknown>(req);
+    } catch {
+      return jsonRes(res, 400, { ok: false, error: 'bad_json' });
+    }
+    const claimedSessionId = raw && typeof raw === 'object' && !Array.isArray(raw)
+      ? (raw as Record<string, unknown>).sessionId
+      : undefined;
+    const ds = typeof claimedSessionId === 'string'
+      ? findActiveBySessionId(claimedSessionId)
+      : undefined;
+    const decision = authorizeV3SessionRunMutationRequest({
+      runId: params.runId,
+      mutation: 'start',
+      raw,
+      trustedHost: isTrustedHostIpcRequest(req),
+      session: ds
+        ? {
+            receiver: !!ds.session.vcMeetingReceiver,
+            ...(ds.managedTurnOrigin ? { liveOrigin: ds.managedTurnOrigin } : {}),
+            ...(ds.session.lastCallerOpenId ? { callerOpenId: ds.session.lastCallerOpenId } : {}),
+            ...(ds.chatId ? { chatId: ds.chatId } : {}),
+            ...(ds.larkAppId ? { larkAppId: ds.larkAppId } : {}),
+            ...(ds.session.quoteTargetId ? { quoteTargetId: ds.session.quoteTargetId } : {}),
+            ...((ds.currentReplyTarget ?? ds.session.currentReplyTarget)?.turnId
+              ? {
+                  currentReplyTargetTurnId:
+                    (ds.currentReplyTarget ?? ds.session.currentReplyTarget)!.turnId,
+                }
+              : {}),
+          }
+        : undefined,
+      selfLarkAppId: selfV3LarkAppId,
+      baseDir: v3DefaultBaseDir(),
+    });
+    if (!decision.ok) {
+      return jsonRes(res, decision.status, {
+        ok: false,
+        error: decision.error,
+        ...(decision.detail ? { detail: decision.detail } : {}),
+      });
+    }
+    try {
+      if (typeof claimedSessionId !== 'string') {
+        return jsonRes(res, 400, { ok: false, error: 'missing_session_id' });
+      }
+      const stagingRoot = bindArtifactDirectory(
+        v3SessionWorkflowStagingDir(config.session.dataDir, claimedSessionId),
+        'workflow session staging root',
+      );
+      const stagedSpecPath = v3SessionWorkflowSpecPath(
+        config.session.dataDir,
+        claimedSessionId,
+        params.runId,
+      );
+      const stagedRun = bindArtifactDirectory(
+        dirname(stagedSpecPath),
+        'workflow staged run',
+        stagingRoot,
+      );
+      const stagedSpec = readStableArtifactFile(
+        stagedSpecPath,
+        'workflow staged spec',
+        stagedRun,
+        1024 * 1024,
+      );
+      atomicWriteFileSync(join(decision.runDir, 'spec.md'), stagedSpec.bytes, {
+        followTargetSymlink: false,
+      });
+      const outcome = hostSpecFinalize(decision.runDir);
+      if (!outcome.ok) {
+        return jsonRes(res, 422, {
+          ok: false,
+          error: 'spec_validation_failed',
+          problems: outcome.problems,
+        });
+      }
+      return jsonRes(res, 200, {
+        ok: true,
+        runId: params.runId,
+        status: outcome.state!.status,
+        specJsonPath: outcome.state!.specJsonPath,
+      });
+    } catch (err) {
+      return jsonRes(res, 400, {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  },
+);
+
 for (const sessionRelayMutation of V3_SESSION_RUN_MUTATIONS) {
   ipcRoute(
     'POST',

@@ -104,6 +104,24 @@ describe('mergeFsRules + accessForPath (the policy semantics)', () => {
 });
 
 describe('buildFsPolicy', () => {
+  it('keeps the current session workflow staging writable inside the denied sandbox tree', () => {
+    const sessionRoot = '/home/u/.botmux/data/sandboxes/sess-1';
+    const staging = `${sessionRoot}/workflow-runs`;
+    const p = buildFsPolicy(ctx({
+      platform: 'linux',
+      homeDir: '/home/u',
+      botHome: '/home/u/.botmux/bots/cli_self',
+      botmuxHome: '/home/u/.botmux',
+      sessionDataDir: '/home/u/.botmux/data',
+      sessionId: 'sess-1',
+      workingDir: '/home/u/proj',
+      extraWritePaths: [staging],
+      mandatoryDenyPaths: [sessionRoot],
+    }));
+    expect(accessForPath(p.rules, `${sessionRoot}/empty`).access).toBe('deny');
+    expect(accessForPath(p.rules, `${staging}/run-1/spec.md`).access).toBe('readWrite');
+  });
+
   it('reasonix state root is read-write so identity, sessions, leases and skills persist in sandbox', () => {
     const adapter = createReasonixAdapter('/usr/bin/reasonix');
     const p = buildFsPolicy(ctx({
