@@ -30,8 +30,10 @@ export interface QuoteTargetArgs {
  */
 export function resolveQuoteTarget(args: QuoteTargetArgs): string | null {
   if (!args.isChatScope || args.sendTopLevel || args.noQuote) return null;
-  const target = args.explicitQuote ?? args.sessionQuoteTargetId;
-  return target && target.trim() ? target.trim() : null;
+  const explicit = args.explicitQuote?.trim();
+  if (explicit) return explicit;
+  const target = args.sessionQuoteTargetId?.trim();
+  return target?.startsWith('om_') ? target : null;
 }
 
 export interface ManagedVcQuoteArgs {

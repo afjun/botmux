@@ -9,7 +9,10 @@ import {
 } from '../src/core/managed-origin-capability.js';
 import { WorkflowDaemonMutationTransportError } from '../src/workflows/v3/daemon-ipc-client.js';
 import {
+  postWorkflowSessionRunCreate,
   postWorkflowSessionRunMutation,
+  postWorkflowSessionSavedWorkflowRun,
+  postWorkflowSessionSpecFinalize,
   readWorkflowSessionRelayContext,
   type WorkflowSessionRelayContext,
 } from '../src/workflows/v3/session-relay-client.js';
@@ -159,6 +162,71 @@ describe('postWorkflowSessionRunMutation', () => {
     expect(url).toBe('http://127.0.0.1:4999/api/v3/session-runs/run-1/cancel');
     expect(JSON.parse(String(init.body))).toEqual({
       reason: 'stop',
+      sessionId: 'sess-1',
+      originCapability: CAPABILITY,
+      originTurnId: 'turn-7',
+      originDispatchAttempt: 2,
+    });
+  });
+
+  it('POSTs workflow new to the collection route with the same turn capability', async () => {
+    const fetchImpl = fetchOk({ ok: true, runId: 'run-1' }, 201);
+    const response = await postWorkflowSessionRunCreate({
+      context,
+      goal: 'ship the fix',
+      fetchImpl,
+    });
+    expect(response.status).toBe(201);
+    const [url, init] = fetchImpl.mock.calls[0]! as unknown as [string, RequestInit];
+    expect(url).toBe('http://127.0.0.1:4310/api/v3/session-runs');
+    expect(JSON.parse(String(init.body))).toEqual({
+      goal: 'ship the fix',
+      sessionId: 'sess-1',
+      originCapability: CAPABILITY,
+      originTurnId: 'turn-7',
+      originDispatchAttempt: 2,
+    });
+  });
+
+  it('POSTs spec-finalize without exposing a host spec path', async () => {
+    const fetchImpl = fetchOk({ ok: true, status: 'spec_ready' });
+    await postWorkflowSessionSpecFinalize({
+      context,
+      runId: 'run-1',
+      fetchImpl,
+    });
+    const [url, init] = fetchImpl.mock.calls[0]! as unknown as [string, RequestInit];
+    expect(url).toBe('http://127.0.0.1:4310/api/v3/session-runs/run-1/spec-finalize');
+    expect(JSON.parse(String(init.body))).toEqual({
+      sessionId: 'sess-1',
+      originCapability: CAPABILITY,
+      originTurnId: 'turn-7',
+      originDispatchAttempt: 2,
+    });
+  });
+
+  it('POSTs a Saved Workflow run with only its ref and typed params', async () => {
+    const fetchImpl = vi.fn(async () => new Response(
+      JSON.stringify({ ok: true, runId: 'run-saved' }),
+      { status: 202 },
+    ));
+    await postWorkflowSessionSavedWorkflowRun({
+      context,
+      ref: 'eventbus-development',
+      rawParams: {
+        task_goal: { kind: 'string', value: '修复测试需求' },
+        retry_limit: { kind: 'json', value: 2 },
+      },
+      fetchImpl,
+    });
+    const [url, init] = fetchImpl.mock.calls[0]! as unknown as [string, RequestInit];
+    expect(url).toBe('http://127.0.0.1:4310/api/v3/session-runs/saved-workflow');
+    expect(JSON.parse(String(init.body))).toEqual({
+      ref: 'eventbus-development',
+      rawParams: {
+        task_goal: { kind: 'string', value: '修复测试需求' },
+        retry_limit: { kind: 'json', value: 2 },
+      },
       sessionId: 'sess-1',
       originCapability: CAPABILITY,
       originTurnId: 'turn-7',

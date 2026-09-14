@@ -54,6 +54,12 @@ import {
   type V3AdHocRunEnvelope,
 } from './run-envelope.js';
 import { V3_SUPPORTED_CLIS, isV3SupportedCli, type BotSnapshot } from './contract.js';
+import {
+  postWorkflowSessionRunCreate,
+  postWorkflowSessionSpecFinalize,
+  readWorkflowSessionRelayContext,
+} from './session-relay-client.js';
+import type { WorkflowDaemonMutationResponse } from './daemon-ipc-client.js';
 
 // ─── Core operations (dep-injected, pure of CLI / process concerns) ─────────
 
@@ -613,6 +619,60 @@ export interface WorkflowHostCommandDeps {
   loadBots?: () => BotConfig[];
   /** Test/dev seam; production resolves fresh current-turn provenance. */
   resolveChatBinding?: () => RunChatBinding | undefined;
+  createViaSessionRelay?: (goal: string, baseDir?: string) => Promise<Record<string, unknown> | null>;
+  specFinalizeViaSessionRelay?: (
+    runId: string,
+    baseDir?: string,
+  ) => Promise<Record<string, unknown> | null>;
+}
+
+async function createViaSessionRelay(
+  goal: string,
+  requestedBaseDir?: string,
+): Promise<Record<string, unknown> | null> {
+  const dataDir = process.env.SESSION_DATA_DIR;
+  if (!dataDir) return null;
+  const context = readWorkflowSessionRelayContext({ env: process.env, dataDir });
+  if (!context) return null;
+  if (requestedBaseDir) {
+    throw new Error('sandbox/read-isolation 会话不支持 --base-dir；run 由 daemon 写入默认目录');
+  }
+  const response = await postWorkflowSessionRunCreate({ context, goal });
+  return parseSessionRelayResponse(response, 'workflow new');
+}
+
+function parseSessionRelayResponse(
+  response: WorkflowDaemonMutationResponse,
+  command: string,
+): Record<string, unknown> {
+  let body: Record<string, unknown>;
+  try {
+    body = JSON.parse(response.bodyRaw) as Record<string, unknown>;
+  } catch {
+    throw new Error(`${command} relay 返回了无效 JSON（HTTP ${response.status}）`);
+  }
+  if (!response.ok) {
+    throw new Error(`${command} relay 被拒绝：${String(body.detail ?? body.error ?? response.status)}`);
+  }
+  return body;
+}
+
+async function specFinalizeViaSessionRelay(
+  runId: string,
+  requestedBaseDir?: string,
+): Promise<Record<string, unknown> | null> {
+  const dataDir = process.env.SESSION_DATA_DIR;
+  if (!dataDir) return null;
+  const context = readWorkflowSessionRelayContext({ env: process.env, dataDir });
+  if (!context) return null;
+  if (requestedBaseDir) {
+    throw new Error('sandbox/read-isolation 会话不支持 --base-dir；run 由 daemon 管理');
+  }
+  const response = await postWorkflowSessionSpecFinalize({ context, runId });
+  if (response.status === 422) {
+    return JSON.parse(response.bodyRaw) as Record<string, unknown>;
+  }
+  return parseSessionRelayResponse(response, 'workflow spec-finalize');
 }
 
 export async function cmdWorkflowHost(
@@ -632,6 +692,14 @@ export async function cmdWorkflowHost(
     case 'new': {
       const goal = firstPositional(rest);
       if (!goal) throw new Error('用法: botmux workflow new "<目标>" [--base-dir <dir>]');
+      const relayed = await (deps.createViaSessionRelay ?? createViaSessionRelay)(
+        goal,
+        argValue(rest, '--base-dir'),
+      );
+      if (relayed) {
+        console.log(JSON.stringify(relayed, null, 2));
+        return;
+      }
       // grill 经 daemon worker 出生时，env 带话题上下文 → 落 chatBinding，供后续
       // daemon humanGate 发审批卡用（CLI/dev 出生无 env → undefined，不影响）。
       const chatBinding = (deps.resolveChatBinding ?? chatBindingFromEnv)();
@@ -644,6 +712,23 @@ export async function cmdWorkflowHost(
     }
     case 'spec-finalize': {
       const runId = requireRunId(rest);
+      const relayed = await (
+        deps.specFinalizeViaSessionRelay ?? specFinalizeViaSessionRelay
+      )(runId, argValue(rest, '--base-dir'));
+      if (relayed) {
+        if (relayed.error === 'spec_validation_failed') {
+          const problems = Array.isArray(relayed.problems) ? relayed.problems.map(String) : [];
+          console.error(`spec 校验失败（先修 spec.md 再 finalize）：\n  - ${problems.join('\n  - ')}`);
+          process.exitCode = 1;
+          return;
+        }
+        console.log(JSON.stringify({
+          runId,
+          status: relayed.status,
+          specJsonPath: relayed.specJsonPath,
+        }, null, 2));
+        return;
+      }
       const out = hostSpecFinalize(guardedRunDir(runId));
       if (!out.ok) {
         console.error(`spec 校验失败（先修 spec.md 再 finalize）:\n  - ${out.problems!.join('\n  - ')}`);

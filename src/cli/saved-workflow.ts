@@ -18,6 +18,11 @@ import {
 } from '../workflows/v3/library-service.js';
 import { SAVED_WORKFLOW_PARAM_NAME_RE } from '../workflows/v3/library-schema.js';
 import { postWorkflowDaemonMutation } from '../workflows/v3/daemon-ipc-client.js';
+import {
+  postWorkflowSessionSavedWorkflowRun,
+  readWorkflowSessionRelayContext,
+  type WorkflowSessionRelayContext,
+} from '../workflows/v3/session-relay-client.js';
 
 const FORBIDDEN_PARAM_NAMES = new Set(['__proto__', 'prototype', 'constructor']);
 const RUN_FLAGS_WITH_VALUE = new Set(['--library-dir', '--base-dir', '--run-id']);
@@ -284,6 +289,57 @@ export function collectSavedWorkflowRawParams(args: string[]): Record<string, Ra
   return out;
 }
 
+export async function runSavedWorkflowViaSessionRelay(
+  args: string[],
+  deps: {
+    env?: NodeJS.ProcessEnv;
+    readContext?: (options: {
+      env: NodeJS.ProcessEnv;
+      dataDir: string;
+    }) => WorkflowSessionRelayContext | null;
+    post?: typeof postWorkflowSessionSavedWorkflowRun;
+  } = {},
+): Promise<Record<string, unknown> | null> {
+  const env = deps.env ?? process.env;
+  const dataDir = env.SESSION_DATA_DIR;
+  if (!dataDir) return null;
+  const context = (deps.readContext ?? readWorkflowSessionRelayContext)({ env, dataDir });
+  if (!context) return null;
+  for (const flag of ['--library-dir', '--base-dir', '--run-id']) {
+    if (argValue(args, flag) !== undefined) {
+      throw new Error(`隔离会话中的 botmux workflow run 不支持 ${flag}；路径和 runId 由 daemon 管理`);
+    }
+  }
+  const positional = positionals(args, [
+    '--library-dir', '--base-dir', '--param', '--param-json', '--run-id',
+  ]);
+  const ref = positional.find((token) => !token.includes('='));
+  if (!ref) throw new Error('用法: botmux workflow run <名称|workflowId> [--param key=value]');
+  const response = await (deps.post ?? postWorkflowSessionSavedWorkflowRun)({
+    context,
+    ref,
+    rawParams: collectSavedWorkflowRawParams(args),
+  });
+  let body: unknown;
+  try {
+    body = JSON.parse(response.bodyRaw) as unknown;
+  } catch {
+    throw new Error(`daemon Saved Workflow relay 返回了无效响应 (HTTP ${response.status})`);
+  }
+  if (!response.ok) {
+    const error = body && typeof body === 'object'
+      ? (body as Record<string, unknown>).detail ?? (body as Record<string, unknown>).error
+      : undefined;
+    throw new Error(`daemon Saved Workflow relay 失败 (HTTP ${response.status}): ${String(error ?? response.bodyRaw)}`);
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)
+    || (body as Record<string, unknown>).ok !== true
+    || typeof (body as Record<string, unknown>).runId !== 'string') {
+    throw new Error('daemon Saved Workflow relay 返回缺少 runId');
+  }
+  return body as Record<string, unknown>;
+}
+
 async function startMaterializedRun(runId: string, larkAppId: string): Promise<void> {
   const daemon = findOnlineDaemon(larkAppId);
   if (!daemon) throw new Error(`bot ${larkAppId} 的 daemon 不在线，run 已物化但尚未启动：${runId}`);
@@ -294,10 +350,18 @@ async function startMaterializedRun(runId: string, larkAppId: string): Promise<v
 }
 
 export async function cmdSavedWorkflow(sub: string, args: string[]): Promise<void> {
+  const json = hasFlag(args, '--json');
+  if (sub === 'run') {
+    const relayed = await runSavedWorkflowViaSessionRelay(args);
+    if (relayed) {
+      if (json) console.log(JSON.stringify(relayed, null, 2));
+      else console.log(`✅ Saved Workflow 已启动：${String(relayed.runId)}`);
+      return;
+    }
+  }
   const context = contextFromEnv();
   const dataDir = libraryDataDir(args);
   const baseDir = runsBaseDir(args);
-  const json = hasFlag(args, '--json');
 
   if (sub === 'save') {
     // Global publication is an IM authorization decision (`canOperate`), not

@@ -89,6 +89,59 @@ function writeValidSpecMd(specPath: string, runId: string): void {
 
 const DUMMY_BOT: BotSnapshot = { larkAppId: 'cli_x', cliId: 'claude-code', workingDir: '/tmp' };
 
+describe('host — isolated workflow new relay', () => {
+  it('returns the daemon-created run without reading process-tree provenance locally', async () => {
+    const relayed = {
+      ok: true,
+      runId: 'run-relayed',
+      runDir: '/host/.botmux/v3-runs/run-relayed',
+      status: 'grilling',
+      specPath: '/host/.botmux/v3-runs/run-relayed/spec.md',
+      chatBound: true,
+    };
+    const createViaSessionRelay = vi.fn(async () => relayed);
+    const resolveChatBinding = vi.fn(() => { throw new Error('must not use host provenance'); });
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      await cmdWorkflowHost('new', ['ship the fix'], {
+        createViaSessionRelay,
+        resolveChatBinding,
+      });
+      expect(createViaSessionRelay).toHaveBeenCalledWith('ship the fix', undefined);
+      expect(resolveChatBinding).not.toHaveBeenCalled();
+      expect(log).toHaveBeenCalledWith(JSON.stringify(relayed, null, 2));
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it('finalizes the staged spec through daemon without reading the host run locally', async () => {
+    const specFinalizeViaSessionRelay = vi.fn(async () => ({
+      ok: true,
+      runId: 'run-relayed',
+      status: 'spec_ready',
+      specJsonPath: '/host/.botmux/v3-runs/run-relayed/spec.json',
+    }));
+    const resolveChatBinding = vi.fn(() => { throw new Error('must not use host provenance'); });
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      await cmdWorkflowHost('spec-finalize', ['run-relayed'], {
+        specFinalizeViaSessionRelay,
+        resolveChatBinding,
+      });
+      expect(specFinalizeViaSessionRelay).toHaveBeenCalledWith('run-relayed', undefined);
+      expect(resolveChatBinding).not.toHaveBeenCalled();
+      expect(log).toHaveBeenCalledWith(JSON.stringify({
+        runId: 'run-relayed',
+        status: 'spec_ready',
+        specJsonPath: '/host/.botmux/v3-runs/run-relayed/spec.json',
+      }, null, 2));
+    } finally {
+      log.mockRestore();
+    }
+  });
+});
+
 describe('host — architect/default bot selection', () => {
   it('pins the invoking chat bot instead of bots.json[0] and accepts Traex/Relay', () => {
     const b = base();

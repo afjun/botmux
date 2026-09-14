@@ -4,8 +4,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
+  authorizeV3SessionRunCreateRequest,
   authorizeV3SessionRunMutationRequest,
+  authorizeV3SessionSavedWorkflowRunRequest,
   V3_SESSION_RUN_MUTATIONS,
+  v3SessionWorkflowSpecPath,
+  v3SessionWorkflowStagingDir,
   type V3SessionRelaySessionView,
 } from '../src/workflows/v3/session-relay.js';
 import type { RunChatBinding } from '../src/workflows/v3/grill-state.js';
@@ -81,6 +85,15 @@ describe('v3 session relay authorization', () => {
     });
   }
 
+  it('keeps writable workflow artifacts inside the current session staging root', () => {
+    expect(v3SessionWorkflowStagingDir('/state', 'sess-1'))
+      .toBe('/state/sandboxes/sess-1/workflow-runs');
+    expect(v3SessionWorkflowSpecPath('/state', 'sess-1', 'run-1'))
+      .toBe('/state/sandboxes/sess-1/workflow-runs/run-1/spec.md');
+    expect(() => v3SessionWorkflowStagingDir('/state', '../other')).toThrow(/invalid.*session id/);
+    expect(() => v3SessionWorkflowSpecPath('/state', 'sess-1', '../run')).toThrow(/invalid.*run id/);
+  });
+
   it('authorizes a capability-proven session against its bound run', () => {
     writeEnvelope('bound-ok', BINDING);
     expect(authorize()).toEqual({
@@ -89,6 +102,109 @@ describe('v3 session relay authorization', () => {
       runDir: join(baseDir, 'bound-ok'),
       larkAppId: 'cli_owner',
     });
+  });
+
+  it('authorizes run creation from the live session identity, not body claims', () => {
+    expect(authorizeV3SessionRunCreateRequest({
+      raw: {
+        goal: 'ship the fix',
+        sessionId: 'sess-1',
+        originCapability: CAPABILITY,
+        ownerOpenId: 'ou_attacker',
+        chatId: 'oc_attacker',
+      },
+      trustedHost: false,
+      session: sessionView({
+        chatType: 'group',
+        rootMessageId: 'om_root',
+      }),
+      selfLarkAppId: 'cli_owner',
+    })).toEqual({
+      ok: true,
+      goal: 'ship the fix',
+      chatBinding: {
+        larkAppId: 'cli_owner',
+        chatId: 'oc_owner',
+        chatType: 'group',
+        rootMessageId: 'om_root',
+        sessionId: 'sess-1',
+        ownerOpenId: 'ou_caller',
+      },
+    });
+  });
+
+  it('authorizes Saved Workflow dispatch and rebuilds actor context from the live session', () => {
+    expect(authorizeV3SessionSavedWorkflowRunRequest({
+      raw: {
+        ref: 'eventbus-development',
+        rawParams: {
+          task_goal: { kind: 'string', value: '修复测试需求' },
+          retry_limit: { kind: 'json', value: 2 },
+        },
+        sessionId: 'sess-1',
+        originCapability: CAPABILITY,
+        ownerOpenId: 'ou_attacker',
+        chatId: 'oc_attacker',
+      },
+      trustedHost: false,
+      session: sessionView({ chatType: 'group', rootMessageId: 'om_root' }),
+      selfLarkAppId: 'cli_owner',
+    })).toEqual({
+      ok: true,
+      ref: 'eventbus-development',
+      rawParams: {
+        task_goal: { kind: 'string', value: '修复测试需求' },
+        retry_limit: { kind: 'json', value: 2 },
+      },
+      context: {
+        actor: { larkAppId: 'cli_owner', openId: 'ou_caller' },
+        chatId: 'oc_owner',
+        chatType: 'group',
+        rootMessageId: 'om_root',
+        sessionId: 'sess-1',
+      },
+    });
+  });
+
+  it('rejects malformed Saved Workflow refs and raw params', () => {
+    const base = {
+      trustedHost: false,
+      session: sessionView(),
+      selfLarkAppId: 'cli_owner',
+    };
+    expect(authorizeV3SessionSavedWorkflowRunRequest({
+      ...base,
+      raw: { sessionId: 'sess-1', originCapability: CAPABILITY, ref: '', rawParams: {} },
+    })).toEqual({ ok: false, status: 400, error: 'missing_workflow_ref' });
+    expect(authorizeV3SessionSavedWorkflowRunRequest({
+      ...base,
+      raw: {
+        sessionId: 'sess-1', originCapability: CAPABILITY, ref: 'wf',
+        rawParams: { task_goal: { kind: 'string', value: 42 } },
+      },
+    })).toEqual({ ok: false, status: 400, error: 'bad_workflow_params' });
+    expect(authorizeV3SessionSavedWorkflowRunRequest({
+      ...base,
+      raw: {
+        sessionId: 'sess-1', originCapability: CAPABILITY, ref: 'wf',
+        rawParams: { __proto__: { kind: 'string', value: 'x' } },
+      },
+    })).toEqual({ ok: false, status: 400, error: 'bad_workflow_params' });
+  });
+
+  it('rejects run creation without a goal or with stale turn provenance', () => {
+    expect(authorizeV3SessionRunCreateRequest({
+      raw: { sessionId: 'sess-1', originCapability: CAPABILITY },
+      trustedHost: false,
+      session: sessionView(),
+      selfLarkAppId: 'cli_owner',
+    })).toEqual({ ok: false, status: 400, error: 'missing_goal' });
+    expect(authorizeV3SessionRunCreateRequest({
+      raw: { goal: 'g', sessionId: 'sess-1', originCapability: CAPABILITY },
+      trustedHost: false,
+      session: sessionView({ quoteTargetId: 'turn-next' }),
+      selfLarkAppId: 'cli_owner',
+    })).toEqual({ ok: false, status: 403, error: 'turn_provenance_stale' });
   });
 
   it('accepts a capability-only claim (sandbox relay files carry no turn tuple)', () => {

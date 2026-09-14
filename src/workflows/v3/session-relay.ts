@@ -13,11 +13,18 @@
  * and the mutation payload; session/chat/caller identity is bound server-side.
  */
 
+import { join } from 'node:path';
 import { authorizeSessionScopedIpc } from '../../core/daemon-ipc-session-auth.js';
 import {
   parseWorkflowDaemonMutationBody,
 } from './daemon-ipc-body.js';
 import type { WorkflowDaemonMutation } from './daemon-ipc-client.js';
+import {
+  WORKFLOW_PARAM_NAME_PATTERN,
+  type RawParamInput,
+} from '../shared/params.js';
+import type { RunChatBinding } from './grill-state.js';
+import type { SavedWorkflowActorContext } from './library-service.js';
 import {
   authorizeV3RunMutationForCurrentTuple,
   V3DaemonCommandAuthorityError,
@@ -25,6 +32,26 @@ import {
 import { isValidRunId } from './ops-projection.js';
 
 export const V3_SESSION_RUN_MUTATION_ROUTE_PREFIX = '/api/v3/session-runs';
+export const V3_SESSION_RUN_CREATE_ROUTE = V3_SESSION_RUN_MUTATION_ROUTE_PREFIX;
+export const V3_SESSION_SAVED_WORKFLOW_RUN_ROUTE =
+  `${V3_SESSION_RUN_MUTATION_ROUTE_PREFIX}/saved-workflow`;
+export const V3_SESSION_SPEC_FINALIZE_MUTATION = 'spec-finalize';
+
+export function v3SessionWorkflowStagingDir(dataDir: string, sessionId: string): string {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(sessionId)) {
+    throw new Error(`invalid workflow staging session id: ${sessionId}`);
+  }
+  return join(dataDir, 'sandboxes', sessionId, 'workflow-runs');
+}
+
+export function v3SessionWorkflowSpecPath(
+  dataDir: string,
+  sessionId: string,
+  runId: string,
+): string {
+  if (!isValidRunId(runId)) throw new Error(`invalid workflow staging run id: ${runId}`);
+  return join(v3SessionWorkflowStagingDir(dataDir, sessionId), runId, 'spec.md');
+}
 
 export const V3_SESSION_RUN_MUTATIONS = ['start', 'cancel', 'retry', 'grant'] as const;
 
@@ -39,6 +66,8 @@ export interface V3SessionRelaySessionView {
   callerOpenId?: string;
   chatId?: string;
   larkAppId?: string;
+  chatType?: 'group' | 'p2p';
+  rootMessageId?: string;
   /** The session's CURRENT inbound turn pointer — advances the moment the next
    * message arrives, while liveOrigin only rotates when that message is
    * actually dequeued into the CLI. The generation join below compares them. */
@@ -58,8 +87,187 @@ export type V3SessionRelayDecision =
     }
   | { ok: false; status: number; error: string; detail?: string };
 
+export type V3SessionRunCreateDecision =
+  | {
+      ok: true;
+      goal: string;
+      chatBinding: RunChatBinding;
+    }
+  | { ok: false; status: number; error: string; detail?: string };
+
+export type V3SessionSavedWorkflowRunDecision =
+  | {
+      ok: true;
+      ref: string;
+      rawParams: Record<string, RawParamInput>;
+      context: SavedWorkflowActorContext;
+    }
+  | { ok: false; status: number; error: string; detail?: string };
+
 function nonEmpty(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
+}
+
+type CurrentTurnDecision =
+  | {
+      ok: true;
+      body: Record<string, unknown>;
+      sessionId: string;
+      current: V3SessionRelaySessionView & {
+        callerOpenId: string;
+        chatId: string;
+        larkAppId: string;
+      };
+    }
+  | { ok: false; status: number; error: string; detail?: string };
+
+function authorizeCurrentTurn(input: {
+  raw: unknown;
+  trustedHost: boolean;
+  session: V3SessionRelaySessionView | undefined;
+  selfLarkAppId: string | undefined;
+}): CurrentTurnDecision {
+  if (!nonEmpty(input.selfLarkAppId)) {
+    return { ok: false, status: 503, error: 'workflow_ipc_identity_unavailable' };
+  }
+  const body = input.raw && typeof input.raw === 'object' && !Array.isArray(input.raw)
+    ? input.raw as Record<string, unknown>
+    : undefined;
+  if (!body) return { ok: false, status: 400, error: 'bad_json' };
+  const sessionId = body.sessionId;
+  if (!nonEmpty(sessionId)) return { ok: false, status: 400, error: 'missing_session_id' };
+
+  const claimedAttempt = typeof body.originDispatchAttempt === 'number'
+    && Number.isSafeInteger(body.originDispatchAttempt)
+    && body.originDispatchAttempt > 0
+    ? body.originDispatchAttempt
+    : undefined;
+  const verified = authorizeSessionScopedIpc({
+    trustedHost: input.trustedHost,
+    sessionExists: !!input.session,
+    receiverSession: !!input.session?.receiver,
+    allowReceiver: false,
+    sessionId,
+    ...(input.session?.liveOrigin ? { liveOrigin: input.session.liveOrigin } : {}),
+    ...(typeof body.originCapability === 'string'
+      ? { claimedCapability: body.originCapability }
+      : {}),
+    ...(typeof body.originTurnId === 'string' ? { claimedTurnId: body.originTurnId } : {}),
+    ...(claimedAttempt !== undefined ? { claimedDispatchAttempt: claimedAttempt } : {}),
+  });
+  if (!verified.ok) return { ok: false, status: 403, error: verified.error };
+  if (input.session?.receiver) {
+    return { ok: false, status: 403, error: 'managed_action_required' };
+  }
+
+  const current = input.session;
+  if (!current
+    || !nonEmpty(current.callerOpenId)
+    || !nonEmpty(current.chatId)
+    || !nonEmpty(current.larkAppId)
+    || current.larkAppId !== input.selfLarkAppId) {
+    return { ok: false, status: 403, error: 'session_identity_incomplete' };
+  }
+
+  const liveTurnId = current.liveOrigin?.turnId;
+  const quoteTargetId = current.quoteTargetId;
+  const replyTurnId = current.currentReplyTargetTurnId;
+  if (!nonEmpty(liveTurnId)
+    || !nonEmpty(quoteTargetId)
+    || quoteTargetId !== liveTurnId
+    || (replyTurnId !== undefined && replyTurnId !== liveTurnId)) {
+    return { ok: false, status: 403, error: 'turn_provenance_stale' };
+  }
+
+  return {
+    ok: true,
+    body,
+    sessionId,
+    current: {
+      ...current,
+      callerOpenId: current.callerOpenId,
+      chatId: current.chatId,
+      larkAppId: current.larkAppId,
+    },
+  };
+}
+
+export function authorizeV3SessionRunCreateRequest(input: {
+  raw: unknown;
+  trustedHost: boolean;
+  session: V3SessionRelaySessionView | undefined;
+  selfLarkAppId: string | undefined;
+}): V3SessionRunCreateDecision {
+  const authorized = authorizeCurrentTurn(input);
+  if (!authorized.ok) return authorized;
+  if (!nonEmpty(authorized.body.goal)) {
+    return { ok: false, status: 400, error: 'missing_goal' };
+  }
+  const current = authorized.current;
+  return {
+    ok: true,
+    goal: authorized.body.goal,
+    chatBinding: {
+      larkAppId: current.larkAppId,
+      chatId: current.chatId,
+      sessionId: authorized.sessionId,
+      ownerOpenId: current.callerOpenId,
+      ...(current.chatType ? { chatType: current.chatType } : {}),
+      ...(nonEmpty(current.rootMessageId) ? { rootMessageId: current.rootMessageId } : {}),
+    },
+  };
+}
+
+const FORBIDDEN_PARAM_NAMES = new Set(['__proto__', 'prototype', 'constructor']);
+
+export function authorizeV3SessionSavedWorkflowRunRequest(input: {
+  raw: unknown;
+  trustedHost: boolean;
+  session: V3SessionRelaySessionView | undefined;
+  selfLarkAppId: string | undefined;
+}): V3SessionSavedWorkflowRunDecision {
+  const authorized = authorizeCurrentTurn(input);
+  if (!authorized.ok) return authorized;
+  const ref = authorized.body.ref;
+  if (!nonEmpty(ref)) {
+    return { ok: false, status: 400, error: 'missing_workflow_ref' };
+  }
+  const raw = authorized.body.rawParams;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { ok: false, status: 400, error: 'bad_workflow_params' };
+  }
+  const proto = Object.getPrototypeOf(raw);
+  if (proto !== Object.prototype && proto !== null) {
+    return { ok: false, status: 400, error: 'bad_workflow_params' };
+  }
+  const rawParams = Object.create(null) as Record<string, RawParamInput>;
+  for (const [name, candidate] of Object.entries(raw)) {
+    if (!WORKFLOW_PARAM_NAME_PATTERN.test(name) || FORBIDDEN_PARAM_NAMES.has(name)
+      || !candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+      return { ok: false, status: 400, error: 'bad_workflow_params' };
+    }
+    const value = candidate as Record<string, unknown>;
+    if (value.kind === 'string' && typeof value.value === 'string') {
+      rawParams[name] = { kind: 'string', value: value.value };
+    } else if (value.kind === 'json' && Object.prototype.hasOwnProperty.call(value, 'value')) {
+      rawParams[name] = { kind: 'json', value: value.value };
+    } else {
+      return { ok: false, status: 400, error: 'bad_workflow_params' };
+    }
+  }
+  const current = authorized.current;
+  return {
+    ok: true,
+    ref,
+    rawParams,
+    context: {
+      actor: { larkAppId: current.larkAppId, openId: current.callerOpenId },
+      chatId: current.chatId,
+      ...(current.chatType ? { chatType: current.chatType } : {}),
+      ...(nonEmpty(current.rootMessageId) ? { rootMessageId: current.rootMessageId } : {}),
+      sessionId: authorized.sessionId,
+    },
+  };
 }
 
 /** Mutation payload keys the relay forwards; everything else is dropped so a
@@ -93,73 +301,9 @@ export function authorizeV3SessionRunMutationRequest(input: {
   if (!isValidRunId(input.runId)) {
     return { ok: false, status: 400, error: 'bad_run_id' };
   }
-  if (!nonEmpty(input.selfLarkAppId)) {
-    return { ok: false, status: 503, error: 'workflow_ipc_identity_unavailable' };
-  }
-  const body = input.raw && typeof input.raw === 'object' && !Array.isArray(input.raw)
-    ? input.raw as Record<string, unknown>
-    : undefined;
-  if (!body) return { ok: false, status: 400, error: 'bad_json' };
-  const sessionId = body.sessionId;
-  if (!nonEmpty(sessionId)) return { ok: false, status: 400, error: 'missing_session_id' };
-
-  const claimedAttempt = typeof body.originDispatchAttempt === 'number'
-    && Number.isSafeInteger(body.originDispatchAttempt)
-    && body.originDispatchAttempt > 0
-    ? body.originDispatchAttempt
-    : undefined;
-  const verified = authorizeSessionScopedIpc({
-    trustedHost: input.trustedHost,
-    sessionExists: !!input.session,
-    receiverSession: !!input.session?.receiver,
-    // A meeting receiver must not drive workflow runs: its side effects belong
-    // to the managed action ledger, same posture as /api/asks.
-    allowReceiver: false,
-    sessionId,
-    ...(input.session?.liveOrigin ? { liveOrigin: input.session.liveOrigin } : {}),
-    ...(typeof body.originCapability === 'string'
-      ? { claimedCapability: body.originCapability }
-      : {}),
-    ...(typeof body.originTurnId === 'string' ? { claimedTurnId: body.originTurnId } : {}),
-    ...(claimedAttempt !== undefined ? { claimedDispatchAttempt: claimedAttempt } : {}),
-  });
-  if (!verified.ok) return { ok: false, status: 403, error: verified.error };
-  if (input.session?.receiver) {
-    return { ok: false, status: 403, error: 'managed_action_required' };
-  }
-
-  // The capability authenticates exactly one live daemon session. Every field
-  // of the mutation tuple now comes from that session record — the request
-  // body cannot select another caller/chat/bot.
-  const current = input.session;
-  if (!current
-    || !nonEmpty(current.callerOpenId)
-    || !nonEmpty(current.chatId)
-    || !nonEmpty(current.larkAppId)) {
-    return { ok: false, status: 403, error: 'session_identity_incomplete' };
-  }
-  if (current.larkAppId !== input.selfLarkAppId) {
-    return { ok: false, status: 403, error: 'session_identity_incomplete' };
-  }
-
-  // Generation join, mirroring the host path (current-turn-provenance.ts):
-  // lastCallerOpenId/quoteTargetId advance the moment the NEXT inbound message
-  // arrives, while the capability rotates only when that message is dequeued
-  // into the CLI (worker flushPending). The capability therefore proves turn
-  // A, but the caller fields may already describe a queued turn B — mixing the
-  // two would let A borrow B's identity. Only when the live capability's
-  // turnId IS the session's current turn pointer do all tuple fields belong to
-  // one generation (they are written atomically per inbound message);
-  // anything else fails closed, exactly like the host marker join.
-  const liveTurnId = current.liveOrigin?.turnId;
-  const quoteTargetId = current.quoteTargetId;
-  const replyTurnId = current.currentReplyTargetTurnId;
-  if (!nonEmpty(liveTurnId)
-    || !nonEmpty(quoteTargetId)
-    || quoteTargetId !== liveTurnId
-    || (replyTurnId !== undefined && replyTurnId !== liveTurnId)) {
-    return { ok: false, status: 403, error: 'turn_provenance_stale' };
-  }
+  const authorized = authorizeCurrentTurn(input);
+  if (!authorized.ok) return authorized;
+  const { body, current } = authorized;
 
   let authority;
   try {

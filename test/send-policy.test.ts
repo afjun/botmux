@@ -39,6 +39,10 @@ describe('resolveQuoteTarget', () => {
     expect(resolveQuoteTarget({ ...base, explicitQuote: 'om_b', sessionQuoteTargetId: 'om_a' })).toBe('om_b');
   });
 
+  it('does not quote a synthetic webhook turn id', () => {
+    expect(resolveQuoteTarget({ ...base, sessionQuoteTargetId: 'trg_123' })).toBeNull();
+  });
+
   it('--no-quote forces plain send', () => {
     expect(resolveQuoteTarget({ ...base, noQuote: true, sessionQuoteTargetId: 'om_a' })).toBeNull();
   });

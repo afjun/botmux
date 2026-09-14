@@ -644,6 +644,10 @@ export async function triggerSessionTurn(
       ds.session.rootMessageId || chatId,
     );
   }
+  if (ds) {
+    ds.session.quoteTargetId = triggerId;
+    sessionStore.updateSession(ds.session);
+  }
 
   if (ds?.worker && !ds.worker.killed) {
     const content = buildExistingSessionContent(
@@ -693,7 +697,7 @@ export async function triggerSessionTurn(
     const dispatchAttempt = prepareStableDispatch(ds, false);
     armFinalOutputSuppression(ds, dispatchAttempt);
     armLoudFinalSuppression(ds);
-    if (!sendWorkerInput(ds, content, stableTurnId ? triggerId : loudTurnId, {
+    if (!sendWorkerInput(ds, content, triggerId, {
       ...(dispatchAttempt !== undefined ? { dispatchAttempt } : {}),
     })) {
       disarmLoudFinalSuppression(ds);
@@ -817,6 +821,8 @@ export async function triggerSessionTurn(
   const now = Date.now();
   session.larkAppId = larkAppId;
   session.ownerOpenId = newSessionCredentialState.credentialPrincipal?.openId;
+  session.lastCallerOpenId = newSessionCredentialState.credentialPrincipal?.openId;
+  session.quoteTargetId = triggerId;
   session.scope = scope;
   if (shouldOpenOwnTopic && topicMessage === null && !ownerNotification) session.externalTriggerTopicless = true;
   session.lastMessageAt = new Date(now).toISOString();
@@ -889,7 +895,7 @@ export async function triggerSessionTurn(
     // actively contributed to should surface its answer, and we never wrongly
     // suppress a normal turn. The suppression is best-effort for this narrow race,
     // not a hard guarantee — consistent with the 256/TTL best-effort bound.
-    if (loudTurnId) newDs.pendingTurnId = loudTurnId;
+    newDs.pendingTurnId = triggerId;
     armLoudFinalSuppression(newDs);
     if (!setActiveSessionIfActive(deps.activeSessions, sessionKey(anchor, larkAppId), newDs)) {
       disarmLoudFinalSuppression(newDs);
@@ -1006,11 +1012,10 @@ export async function triggerSessionTurn(
       ? triggerId
       : { turnId: triggerId, dispatchAttempt });
   }
-  else if (loudTurnId) {
-    armLoudFinalSuppression(newDs);
-    forkWorker(newDs, promptInput, loudTurnId);
+  else {
+    if (loudTurnId) armLoudFinalSuppression(newDs);
+    forkWorker(newDs, promptInput, triggerId);
   }
-  else forkWorker(newDs, promptInput);
 
   return {
     ok: true,

@@ -12,6 +12,7 @@ import {
   contextFromEnv,
   formatSavedWorkflowCliList,
   formatSavedWorkflowCliShow,
+  runSavedWorkflowViaSessionRelay,
 } from '../src/cli/saved-workflow.js';
 
 describe('Saved Workflow CLI param parsing', () => {
@@ -156,6 +157,47 @@ describe('Saved Workflow CLI daemon-managed run root', () => {
       .toThrow(/不支持自定义 --base-dir/);
     expect(() => assertDaemonManagedRunBaseDir('/tmp/canonical-runs/.', '/tmp/canonical-runs'))
       .not.toThrow();
+  });
+});
+
+describe('Saved Workflow CLI isolated-session relay', () => {
+  it('relays before host provenance/library access and returns the daemon result', async () => {
+    const post = vi.fn(async () => ({
+      ok: true,
+      status: 202,
+      bodyRaw: JSON.stringify({ ok: true, runId: 'run-saved' }),
+    }));
+    const result = await runSavedWorkflowViaSessionRelay([
+      'eventbus-development',
+      '--param', 'task_goal=修复测试需求',
+    ], {
+      env: { SESSION_DATA_DIR: '/masked/data' },
+      readContext: () => ({
+        sessionId: 'sess-1', capability: 'c'.repeat(64), ipcPortFallback: 4310,
+      }),
+      post,
+    });
+    expect(result).toEqual({ ok: true, runId: 'run-saved' });
+    expect(post).toHaveBeenCalledWith({
+      context: {
+        sessionId: 'sess-1', capability: 'c'.repeat(64), ipcPortFallback: 4310,
+      },
+      ref: 'eventbus-development',
+      rawParams: { task_goal: { kind: 'string', value: '修复测试需求' } },
+    });
+  });
+
+  it('leaves host sessions on the existing path and rejects sandbox-selected host paths', async () => {
+    await expect(runSavedWorkflowViaSessionRelay(['wf'], {
+      env: { SESSION_DATA_DIR: '/data' },
+      readContext: () => null,
+      post: vi.fn(),
+    })).resolves.toBeNull();
+    await expect(runSavedWorkflowViaSessionRelay(['wf', '--library-dir', '/other'], {
+      env: { SESSION_DATA_DIR: '/data' },
+      readContext: () => ({ sessionId: 's', capability: 'c'.repeat(64) }),
+      post: vi.fn(),
+    })).rejects.toThrow(/隔离会话.*--library-dir/);
   });
 });
 
