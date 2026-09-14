@@ -264,6 +264,44 @@ describe('BridgeTurnQueue', () => {
     expect(ready[0].assistantUuids).toEqual(['continued']);
   });
 
+  it('binds an async trigger by its exact id when BotMux wraps the persisted prompt', () => {
+    const q = new BridgeTurnQueue();
+    q.mark('trg_http', makeFingerprint('logical task text'));
+    q.ingest([
+      user('u-http', '<role>injected context</role> {"triggerId":"trg_http"}'),
+      assistant('a-http', 'done'),
+    ]);
+
+    expect(q.drainEmittable()).toEqual([
+      expect.objectContaining({
+        turnId: 'trg_http',
+        assistantUuids: ['a-http'],
+      }),
+    ]);
+  });
+
+  it('recovers an async trigger when its exact user line was absorbed before the mark', () => {
+    const q = new BridgeTurnQueue();
+    q.absorb([user('u-http', '<role>context</role> {"triggerId":"trg_http"}')]);
+    q.mark('trg_http', makeFingerprint('logical task text'));
+    q.ingest([assistant('a-http', 'done')]);
+
+    expect(q.drainEmittable()).toEqual([
+      expect.objectContaining({ turnId: 'trg_http', assistantUuids: ['a-http'] }),
+    ]);
+  });
+
+  it('does not guess when more than one async trigger is pending', () => {
+    const q = new BridgeTurnQueue();
+    q.mark('trg_one', makeFingerprint('first'));
+    q.mark('trg_two', makeFingerprint('second'));
+
+    q.ingest([assistant('final', 'ambiguous')]);
+
+    expect(q.peek()[0]).toEqual(expect.objectContaining({ isLocal: true }));
+    expect(q.peek().filter(turn => turn.turnId.startsWith('trg_')).every(turn => !turn.started)).toBe(true);
+  });
+
   it('subsequent assistant events keep collecting on the headless turn until the next user event', () => {
     const q = new BridgeTurnQueue();
     q.ingest([

@@ -3631,6 +3631,22 @@ const server = createServer(async (req, res) => {
       return handleDashboardTriggerApi(req, res, { proxyToDaemon });
     }
 
+    if (req.method === 'POST' && url.pathname === '/api/agent-team/cards') {
+      let body: any;
+      try { body = await readJsonBody(req); }
+      catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+      if (typeof body?.botId !== 'string' || !body.botId) {
+        return jsonRes(res, 400, { ok: false, error: 'botId_required' });
+      }
+      const upstream = await proxyToDaemon(body.botId, '/api/agent-team/cards', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+      });
+      const response = await upstream.text();
+      res.writeHead(upstream.status, { 'content-type': upstream.headers.get('content-type') ?? 'application/json' });
+      res.end(response);
+      return;
+    }
+
     // CLI 下拉选项 (id=选择键 + 展示名), 单一事实源在 cli-selection.CLI_SELECT_OPTIONS,
     // 含 aiden×claude / aiden×codex 网关项——前端打开"添加机器人"表单时拉取填充下拉.
     // id 既可能是普通 cliId, 也可能是 'aiden-x-claude' 这类选择键, 由 resolveCliSelection 解析.

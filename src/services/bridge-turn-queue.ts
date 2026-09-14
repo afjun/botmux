@@ -149,12 +149,24 @@ export class BridgeTurnQueue {
   private seen = new Set<string>();
   private queue: BridgePendingTurn[] = [];
   private collecting: BridgePendingTurn | null = null;
+  private recentUserStarts: Array<{ uuid: string; text: string; sourceJsonlPath?: string }> = [];
+
+  private rememberUserStart(ev: TranscriptEvent, sourceJsonlPath?: string): void {
+    if (!ev.uuid || !isMeaningfulUserEvent(ev)) return;
+    this.recentUserStarts.push({
+      uuid: ev.uuid,
+      text: normaliseForFingerprint(extractTurnStartText(ev)),
+      sourceJsonlPath,
+    });
+    if (this.recentUserStarts.length > 32) this.recentUserStarts.shift();
+  }
 
   /** Register events as historical — their uuids are now considered seen
    *  but no attribution happens. Used at attach time to baseline. */
   absorb(events: TranscriptEvent[]): void {
     for (const ev of events) {
       if (ev.uuid) this.seen.add(ev.uuid);
+      this.rememberUserStart(ev);
     }
   }
 
@@ -173,15 +185,33 @@ export class BridgeTurnQueue {
     contentNormalized?: string,
     dispatchAttempt?: number,
   ): string {
-    this.queue.push({
+    const recent = turnId.startsWith('trg_')
+      ? [...this.recentUserStarts].reverse().find(start => start.text.includes(turnId))
+      : undefined;
+    const local = recent
+      ? this.queue.find(turn => turn.isLocal && turn.userUuid === recent.uuid)
+      : undefined;
+    if (local) {
+      local.turnId = turnId;
+      local.dispatchAttempt = dispatchAttempt;
+      local.isLocal = false;
+      local.contentFingerprint = contentFingerprint;
+      local.contentNormalized = contentNormalized;
+      return turnId;
+    }
+    const pending: BridgePendingTurn = {
       turnId,
       dispatchAttempt,
-      started: false,
+      started: !!recent,
       assistantUuids: [],
       contentFingerprint,
       contentNormalized,
       markTimeMs,
-    });
+      userUuid: recent?.uuid,
+      sourceJsonlPath: recent?.sourceJsonlPath,
+    };
+    this.queue.push(pending);
+    if (recent) this.collecting = pending;
     return turnId;
   }
 
@@ -261,6 +291,7 @@ export class BridgeTurnQueue {
         // accidentally contains the fingerprint substring start the
         // wrong turn.
         if (!isMeaningfulUserEvent(ev)) continue;
+        this.rememberUserStart(ev, sourceJsonlPath);
         this.handleTurnStart(uuid, ev, sourceJsonlPath);
       } else if (ev.type === 'attachment' && ev.attachment?.type === 'queued_command') {
         // Type-ahead path: Claude writes `attachment(queued_command)` the
@@ -313,6 +344,9 @@ export class BridgeTurnQueue {
           if (insertAt === -1) this.queue.push(headless);
           else this.queue.splice(insertAt, 0, headless);
           this.collecting = headless;
+        }
+        if (hasVisibleText && this.collecting && !this.collecting.sourceJsonlPath) {
+          this.collecting.sourceJsonlPath = sourceJsonlPath;
         }
         if (hasVisibleText) this.collecting?.assistantUuids.push(uuid);
         if (isClaudeTurnTerminalEvent(ev) && this.collecting) {
@@ -375,7 +409,8 @@ export class BridgeTurnQueue {
         // the substring check so a transcript line that preserved newlines
         // still matches a fingerprint built from the same text.
         const userText = normaliseForFingerprint(extractTurnStartText(ev));
-        if (userText.includes(next.contentFingerprint)) {
+        if (userText.includes(next.contentFingerprint)
+          || (next.turnId.startsWith('trg_') && userText.includes(next.turnId))) {
           next.started = true;
           if (!next.sourceJsonlPath) next.sourceJsonlPath = sourceJsonlPath;
           next.markTimeMs = eventTimeMs;

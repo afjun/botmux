@@ -242,6 +242,7 @@ export interface DaemonSession {
     createdAt: number;
     completedAt?: number;
     content?: string;
+    publishFinalOutput?: boolean;
     usage?: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreateTokens: number };
   }>;
   latestAsyncTriggerId?: string;

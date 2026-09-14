@@ -101,6 +101,7 @@ vi.mock('@larksuiteoapi/node-sdk', () => ({
 import {
   getDaemonReplyCardUsageSnapshot,
   initWorkerPool,
+  __testOnly_deliverFinalOutput,
   __testOnly_setupWorkerHandlers,
 } from '../src/core/worker-pool.js';
 import { MessageWithdrawnError } from '../src/im/lark/client.js';
@@ -228,6 +229,27 @@ function seedSilentReceiverReceipt(): void {
 const SCOPED_DEDUPE_KEY = 'sid-final-out:uuid-1';
 
 describe('Bridge final_output delivery (P2 retry)', () => {
+  it('captures an async result and publishes it when requested', async () => {
+    const ds = makeDs();
+    ds.asyncTriggerResults = new Map([['turn-1', {
+      status: 'pending', createdAt: 1, publishFinalOutput: true,
+    }]]);
+    const sessionReply = vi.fn(async () => 'om_reply');
+    initWorkerPool({
+      sessionReply,
+      getSessionWorkingDir: () => '/tmp',
+      getActiveCount: () => 1,
+      closeSession: vi.fn(),
+    });
+
+    __testOnly_deliverFinalOutput(ds, finalOutputMsg(), 'tag', 0);
+    await vi.runOnlyPendingTimersAsync();
+
+    expect(ds.asyncTriggerResults.get('turn-1')?.content).toBe('final answer');
+    expect(sessionReply).toHaveBeenCalledTimes(1);
+    expect(sessionReply.mock.calls[0][1]).toContain('final answer');
+  });
+
   beforeEach(() => {
     vi.useFakeTimers();
     vi.clearAllMocks();

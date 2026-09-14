@@ -2175,6 +2175,36 @@ ipcRoute('POST', '/api/trigger', async (req, res) => {
   }
 });
 
+ipcRoute('POST', '/api/agent-team/cards', async (req, res) => {
+  if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, error: 'bot_not_found' });
+  let body: any;
+  try { body = await readJsonBody(req, 512 * 1024); }
+  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const title = body?.card?.header?.title?.content;
+  const elements = body?.card?.elements;
+  const isQuestion = title === '需要人工决策' && Array.isArray(elements) && elements.some((element: any) =>
+    element?.actions?.some?.((action: any) => action?.value?.action?.startsWith?.('agent_team_question_'))
+    || element?.elements?.some?.((action: any) => action?.value?.action?.startsWith?.('agent_team_question_')),
+  );
+  const isStatus = title === 'Agent Team 进展' && Array.isArray(elements) && elements.length === 1
+    && elements[0]?.tag === 'div' && elements[0]?.text?.tag === 'lark_md'
+    && typeof elements[0]?.text?.content === 'string';
+  if (body?.botId !== cachedLarkAppId || typeof body?.chatId !== 'string' || !body.chatId.startsWith('oc_')
+    || !body?.card || typeof body.card !== 'object' || (!isQuestion && !isStatus)) {
+    return jsonRes(res, 400, { ok: false, error: 'invalid_agent_team_card' });
+  }
+  if (isQuestion && (!process.env.AGENT_TEAM_CALLBACK_URL || !process.env.AGENT_TEAM_SERVICE_ID
+    || !process.env.AGENT_TEAM_SERVICE_SECRET || !process.env.AGENT_TEAM_LARK_TENANT_ID)) {
+    return jsonRes(res, 503, { ok: false, error: 'agent_team_callback_not_configured' });
+  }
+  try {
+    const messageId = await sendMessage(cachedLarkAppId, body.chatId, JSON.stringify(body.card), 'interactive');
+    return jsonRes(res, 200, { ok: true, messageId });
+  } catch (error: any) {
+    return jsonRes(res, 502, { ok: false, error: error?.message ?? String(error) });
+  }
+});
+
 // ─── Exact chat grants (talk-only) ─────────────────────────────────────────
 
 /**

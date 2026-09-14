@@ -19,6 +19,7 @@ import {
 import { readGlobalConfig, repoPickerScanOptions } from './global-config.js';
 import { buildDashboardUrls } from './core/dashboard-url.js';
 import { resolveBotmuxDataDir } from './core/data-dir.js';
+import { buildAgentTeamCallback } from './services/agent-team-callback.js';
 import { reloadExactDaemonBotConfig } from './core/daemon-config-fence.js';
 import { writeHeartbeat } from './core/daemon-heartbeat.js';
 import { botmuxWrapperFiles, resolveBotmuxWrapperBinDir } from './core/botmux-wrapper.js';
@@ -4742,6 +4743,27 @@ const cardDeps: CardHandlerDeps = {
   lastRepoScan,
   vcMeetingCardAction: (data, appId) => handleVcMeetingCardAction(data, appId),
   codexNotifierCardAction: (data, appId) => handleCodexNotifierCardAction(data, appId),
+  agentTeamCardAction: async (data, appId) => {
+    try {
+      const callback = buildAgentTeamCallback(data, appId);
+      const response = await fetch(callback.url, {
+        method: 'POST',
+        headers: callback.headers,
+        body: callback.body,
+        signal: AbortSignal.timeout(5_000),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const messageId = data.context?.open_message_id ?? data.open_message_id;
+      if (messageId) {
+        void replyMessage(appId, messageId, '已收到提交，Agent Team 正在处理。', 'text', false)
+          .catch(error => logger.warn(`[agent-team] approval acknowledgement failed: ${error instanceof Error ? error.message : String(error)}`));
+      }
+      return { toast: { type: 'success', content: '已收到提交，Agent Team 正在处理' } };
+    } catch (error) {
+      logger.warn(`[agent-team] approval callback failed: ${error instanceof Error ? error.message : String(error)}`);
+      return { toast: { type: 'error', content: '提交失败，请重试' } };
+    }
+  },
   v3GateDeps: {
     driveRun: (runId) => v3GateRunner.driveDetached(runId),
     // 审批权限：复用 canOperate（话题 owner / allowedUsers / oncall）。无 binding（corrupt /

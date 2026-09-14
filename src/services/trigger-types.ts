@@ -53,6 +53,9 @@ export interface TriggerRequest {
      * this loud trigger's turn. The streaming card / start notice still show;
      * only the trailing transcript-driven summary is suppressed. */
     suppressFinalOutput?: boolean;
+    /** Keep async result polling while also publishing the final reply to the
+     * target Lark chat. */
+    publishFinalOutput?: boolean;
     /** Per-turn CLI model override (e.g. a codex model id). Applies only to a
      *  freshly-spawned session; ignored when folding into an existing worker.
      *  Empty/omitted → the bot's configured default. */
@@ -218,6 +221,9 @@ export function validateTriggerRequest(raw: unknown): { ok: true; request: Trigg
   }
   if (options.suppressFinalOutput !== undefined && typeof options.suppressFinalOutput !== 'boolean') {
     return { ok: false, status: 400, body: { ok: false, errorCode: 'bad_request', error: 'options.suppressFinalOutput must be a boolean' } };
+  }
+  if (options.publishFinalOutput !== undefined && typeof options.publishFinalOutput !== 'boolean') {
+    return { ok: false, status: 400, body: { ok: false, errorCode: 'bad_request', error: 'options.publishFinalOutput must be a boolean' } };
   }
   if (options.model !== undefined && (typeof options.model !== 'string' || options.model.length > 200)) {
     return { ok: false, status: 400, body: { ok: false, errorCode: 'bad_request', error: 'options.model must be a string (<=200 chars)' } };

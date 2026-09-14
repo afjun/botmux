@@ -96,6 +96,18 @@ describe('trigger request contract', () => {
     if (!v.ok) expect(v.body.errorCode).toBe('bad_request');
   });
 
+  it('accepts a boolean publishFinalOutput option and rejects non-boolean', () => {
+    const on = request();
+    on.options = { ...on.options, asyncReturnSessionId: true, publishFinalOutput: true };
+    expect(validateTriggerRequest(on).ok).toBe(true);
+
+    const bad = request() as any;
+    bad.options = { ...bad.options, publishFinalOutput: 'yes' };
+    const v = validateTriggerRequest(bad);
+    expect(v.ok).toBe(false);
+    if (!v.ok) expect(v.body.errorCode).toBe('bad_request');
+  });
+
   it('rejects wait-mode timeout outside the bounded range', () => {
     const req = request();
     req.options = { waitForFinalOutput: true, timeoutMs: 999 };
@@ -162,6 +174,13 @@ describe('trigger request contract', () => {
     // guards the specific leak riff observed: model narrating the routing header
     expect(prompt.toLowerCase()).toContain('routing header');
     expect(prompt).toContain('Do not call botmux send');
+  });
+
+  it('documents that an async final result is also published when requested', () => {
+    const req = request();
+    req.options = { asyncReturnSessionId: true, publishFinalOutput: true };
+    const prompt = buildUntrustedEventPrompt(req, 'trg_1');
+    expect(prompt).toContain('also posted to the target chat');
   });
 
   it('no response-mode block without wait/async options (plain webhook delivery)', () => {

@@ -2794,6 +2794,68 @@ describe('POST /api/groups/transfer-owner', () => {
   });
 });
 
+describe('POST /api/agent-team/cards', () => {
+  it('sends only a configured Agent Team approval card through the target bot', async () => {
+    setLarkAppId('cli_agent_team');
+    const previous = {
+      url: process.env.AGENT_TEAM_CALLBACK_URL,
+      service: process.env.AGENT_TEAM_SERVICE_ID,
+      secret: process.env.AGENT_TEAM_SERVICE_SECRET,
+      tenant: process.env.AGENT_TEAM_LARK_TENANT_ID,
+    };
+    process.env.AGENT_TEAM_CALLBACK_URL = 'http://127.0.0.1:18092/api/v1/internal/lark/cards/native-callback';
+    process.env.AGENT_TEAM_SERVICE_ID = 'local-test';
+    process.env.AGENT_TEAM_SERVICE_SECRET = 'test-secret';
+    process.env.AGENT_TEAM_LARK_TENANT_ID = 'local-tenant';
+    const send = vi.spyOn(larkClient, 'sendMessage').mockResolvedValue('om_approval');
+    try {
+      handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
+      const response = await fetch(`http://127.0.0.1:${handle.port}/api/agent-team/cards`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          botId: 'cli_agent_team', chatId: 'oc_team',
+          card: {
+            header: { title: { tag: 'plain_text', content: '需要人工决策' } },
+            elements: [{
+              tag: 'action',
+              actions: [{ tag: 'button', value: { action: 'agent_team_question_select' } }],
+            }],
+          },
+        }),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ ok: true, messageId: 'om_approval' });
+      expect(send).toHaveBeenCalledWith('cli_agent_team', 'oc_team', expect.any(String), 'interactive');
+    } finally {
+      send.mockRestore();
+      for (const [key, value] of Object.entries({
+        AGENT_TEAM_CALLBACK_URL: previous.url,
+        AGENT_TEAM_SERVICE_ID: previous.service,
+        AGENT_TEAM_SERVICE_SECRET: previous.secret,
+        AGENT_TEAM_LARK_TENANT_ID: previous.tenant,
+      })) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+    }
+  });
+
+  it('rejects a card that only spoofs an Agent Team title', async () => {
+    setLarkAppId('cli_agent_team');
+    handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
+    const response = await fetch(`http://127.0.0.1:${handle.port}/api/agent-team/cards`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        botId: 'cli_agent_team', chatId: 'oc_team',
+        card: {
+          header: { title: { tag: 'plain_text', content: 'Agent Team 进展' } },
+          elements: [{ tag: 'button', value: { action: 'unrelated_action' } }],
+        },
+      }),
+    });
+    expect(response.status).toBe(400);
+  });
+});
+
 describe('role profile IPC routes', () => {
   it('previews message listener matches from recent chat history', async () => {
     setLarkAppId('cli_listener');

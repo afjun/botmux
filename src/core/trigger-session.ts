@@ -132,7 +132,9 @@ export function buildExternalEventApplicationContext(req: TriggerRequest): strin
     if (lines.length > 0) lines.push('');
     lines.push(
       '<botmux_http_response_mode trusted="true">',
-      'Your entire reply is returned verbatim to a program as the task result — not shown in a chat.',
+      req.options?.publishFinalOutput
+        ? 'Your entire reply is returned verbatim to a program as the task result and also posted to the target chat.'
+        : 'Your entire reply is returned verbatim to a program as the task result — not shown in a chat.',
       'Output ONLY the final answer. Do NOT include preamble, meta-commentary, or any reasoning about',
       'these instructions / routing headers / system context (e.g. "this is a routing header", "the real',
       'request is…", "here is my answer"). Do not call botmux send; do not post to Feishu/Lark.',
@@ -322,12 +324,13 @@ function waitForSessionFinalOutput(
   });
 }
 
-function beginAsyncTrigger(ds: DaemonSession, triggerId: string): void {
+function beginAsyncTrigger(ds: DaemonSession, triggerId: string, publishFinalOutput = false): void {
   const createdAt = Date.now();
   ds.asyncTriggerResults ??= new Map();
   ds.asyncTriggerResults.set(triggerId, {
     status: 'pending',
     createdAt,
+    publishFinalOutput,
   });
   ds.latestAsyncTriggerId = triggerId;
   // Durably record the pending trigger so a poller can still resolve this
@@ -680,7 +683,7 @@ export async function triggerSessionTurn(
     }
 
     if (req.options?.asyncReturnSessionId) {
-      beginAsyncTrigger(ds, triggerId);
+      beginAsyncTrigger(ds, triggerId, req.options?.publishFinalOutput === true);
       const dispatchAttempt = prepareStableDispatch(ds, false);
       armFinalOutputSuppression(ds, dispatchAttempt);
       sendWorkerInput(ds, content, triggerId, {
@@ -748,7 +751,7 @@ export async function triggerSessionTurn(
     }
 
     if (req.options?.asyncReturnSessionId) {
-      beginAsyncTrigger(ds, triggerId);
+      beginAsyncTrigger(ds, triggerId, req.options?.publishFinalOutput === true);
       const dispatchAttempt = prepareStableDispatch(ds, true);
       armFinalOutputSuppression(ds, dispatchAttempt);
       forkWorker(ds, content, {
@@ -991,7 +994,7 @@ export async function triggerSessionTurn(
   }
 
   if (req.options?.asyncReturnSessionId) {
-    beginAsyncTrigger(newDs, triggerId);
+    beginAsyncTrigger(newDs, triggerId, req.options?.publishFinalOutput === true);
     const dispatchAttempt = prepareStableDispatch(newDs, true);
     armFinalOutputSuppression(newDs, dispatchAttempt);
     forkWorker(newDs, promptInput, dispatchAttempt === undefined
